@@ -1,0 +1,135 @@
+# ==============================================================================
+# CROSS-SUITE PLATFORM: AUTOMATION, COMPILATION & EXECUTION MANUAL
+# ==============================================================================
+
+This document provides complete instructions for executing, compiling, and managing
+the Cross-Suite platform using the automated bootstrapping scripts across Linux, 
+macOS, and Windows systems.
+
+==============================================================================
+==>> 1. QUICK START GUIDE
+==============================================================================
+
+=> LINUX & macOS (Terminal / Bash):
+   1. Open your terminal and navigate to the project directory:
+      cd Cross-Suite_Wizard
+
+   2. Ensure execution permissions are active:
+      chmod +x autorun.sh
+
+   3. Execute the standard bootstrapper:
+      ./autorun.sh
+
+=> WINDOWS (Command Prompt / PowerShell / File Explorer):
+   1. Standard Launch:
+      Double-click `autorun.bat` (or run `autorun.bat` from CMD/PowerShell).
+
+   2. Deep Clean & Hard Rebuild:
+      Double-click `autorun-hard.bat` (or run `autorun-hard.bat` from CMD/PowerShell).
+
+
+==============================================================================
+==>> 2. BASH ENGINE: autorun.sh (Linux & macOS)
+==============================================================================
+
+The `autorun.sh` script automates environment path resolution, toolchain validation, 
+code change detection, incremental compilation, and platform execution.
+
+=> AVAILABLE EXECUTION COMMANDS & FLAGS:
+
+   * Standard Execution (Auto-Detect & Launch):
+     Command: ./autorun.sh
+     Action : Checks dependencies, scans for source code updates, compiles 
+              incrementally if changes are detected, and starts the platform.
+
+   * Force Recompile (Fresh Binary Build):
+     Commands: ./autorun.sh -f
+               ./autorun.sh --force
+               ./autorun.sh -b
+               ./autorun.sh --build
+     Action  : Deletes existing binaries, cleans standard build cache, and forces
+              a clean native compilation.
+
+   * Hard Purge & Cache Reset:
+     Commands: ./autorun.sh -H
+               ./autorun.sh --hard
+     Action  : Completely purges Go module caches, clears build caches, forces 
+              dependency re-download (`go mod download`), tidies modules, and 
+              rebuilds from scratch. Use this if experiencing corrupted dependencies.
+
+   * Universal Multi-Platform Cross-Compilation:
+     Commands: ./autorun.sh -a
+               ./autorun.sh --all
+               ./autorun.sh all
+               ./autorun.sh cross
+     Action  : Compiles static, standalone binaries for all supported platforms 
+              simultaneously and exports them into the `./dist/` folder:
+              - dist/Cross-Suite_Wizard-linux-amd64 (Linux x86_64)
+              - dist/Cross-Suite_Wizard-linux-arm64 (Linux ARM64 / Raspberry Pi / AWS)
+              - dist/Cross-Suite_Wizard-darwin-amd64 (macOS Intel)
+              - dist/Cross-Suite_Wizard-darwin-arm64 (macOS Apple Silicon M1/M2/M3/M4)
+              - dist/Cross-Suite_Wizard-windows-amd64.exe (Windows 64-bit with Manifest)
+
+
+==============================================================================
+==>> 3. WINDOWS ENGINES: autorun.bat & autorun-hard.bat
+==============================================================================
+
+=> autorun.bat (Standard Windows Launcher & Compiler):
+
+   * Standard Launch:
+     Command: autorun.bat
+     Action : Detects Go compiler in system PATH or default directories, checks 
+              for pre-built binaries, builds if missing, and runs the application.
+
+   * Force Recompile:
+     Commands: autorun.bat -f
+               autorun.bat --force
+               autorun.bat -b
+               autorun.bat --build
+     Action  : Purges build artifacts, re-embeds the Windows UAC manifest using 
+              `rsrc`, and generates a fresh `Cross-Suite_Wizard.exe`.
+
+   * Universal Cross-Build from Windows:
+     Commands: autorun.bat -a
+               autorun.bat --all
+               autorun.bat all
+               autorun.bat cross
+     Action  : Generates standalone binaries for Linux, macOS, and Windows into `.\dist\`.
+
+=> autorun-hard.bat (Dedicated Windows Cache Purger):
+
+   * Execution:
+     Command: autorun-hard.bat (or double-click via File Explorer)
+     Action : Invokes a full module cache invalidation (`go clean -modcache`), 
+              clears system build cache, recompiles the Windows binary with embedded 
+              manifests, and provides detailed error trapping upon exit.
+
+
+==============================================================================
+==>> 4. DEVELOPER ENGINE: Makefile CHEATSHEET
+==============================================================================
+
+For environments where `make` is preferred:
+
+   make          - Compiles standard native local binary.
+   make dev      - Downloads dependencies, updates modules, and builds fast host binary.
+   make cross    - Compiles all 5 standalone OS/architecture binaries into `./dist/`.
+   make release  - Generates distribution archives (.tar.gz and .zip) in `./dist/`.
+   make install  - Installs binaries globally to `/usr/local/bin/` with permissions.
+   make clean    - Removes all built binaries, distribution directories, and `.syso` files.
+
+
+==============================================================================
+==>> 5. AUTOMATED DEPENDENCY SELF-HEALING
+==============================================================================
+
+If the Go compiler is not detected on the machine:
+* On Linux: `autorun.sh` checks the system package manager (`apt-get`, `dnf`, `yum`, 
+  `pacman`, `zypper`, `apk`) and installs Go automatically. If package managers fail, 
+  it downloads the official Go runtime tarball directly from `https://go.dev/dl/` 
+  and provisions `/usr/local/go`.
+* On macOS: `autorun.sh` attempts installation via `brew`, falling back to official 
+  tarball deployment.
+* On Windows: `autorun.bat` checks standard system directories and provides direct 
+  guidance if no toolchain is found.
