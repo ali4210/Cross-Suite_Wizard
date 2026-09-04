@@ -20,13 +20,15 @@ set -eu
 SNAPSHOT_DIR=%s
 TARGETS=(%s)
 
-mkdir -p "$SNAPSHOT_DIR/files"
+install -d -m 0700 "$SNAPSHOT_DIR/files"
 
 cat > "$SNAPSHOT_DIR/manifest.txt" <<'MANIFEST'
 snapshot_id=%s
 created_at=%s
 scope=targeted-apt-files
 MANIFEST
+
+chmod 0600 "$SNAPSHOT_DIR/manifest.txt"
 
 for target in "${TARGETS[@]}"; do
 	relative="${target#/}"
@@ -41,15 +43,24 @@ for target in "${TARGETS[@]}"; do
 	else
 		printf 'absent\n' > "$metadata"
 	fi
+
+	chmod 0600 "$metadata"
+	if [ -f "$content" ]; then
+		chmod 0600 "$content"
+	fi
 done
 
-find "$SNAPSHOT_DIR" \
-        -type f \
-        ! -path "$SNAPSHOT_DIR/checksums.sha256" \
-        -print0 \
-	| sort -z \
-	| xargs -0 sha256sum \
-	> "$SNAPSHOT_DIR/checksums.sha256"
+{
+	sha256sum "$SNAPSHOT_DIR/manifest.txt"
+
+	if find "$SNAPSHOT_DIR/files" -type f -print -quit | grep -q .; then
+		find "$SNAPSHOT_DIR/files" -type f -print0 \
+			| sort -z \
+			| xargs -0 sha256sum
+	fi
+} > "$SNAPSHOT_DIR/checksums.sha256"
+
+chmod 0600 "$SNAPSHOT_DIR/checksums.sha256"
 `,
 		shellQuote(path),
 		targets,
@@ -89,6 +100,16 @@ SNAPSHOT_DIR=%s
 TARGETS=(%s)
 
 test -d "$SNAPSHOT_DIR/files"
+test -f "$SNAPSHOT_DIR/manifest.txt"
+test -f "$SNAPSHOT_DIR/checksums.sha256"
+
+if ! (
+	cd "$SNAPSHOT_DIR"
+	sha256sum --strict -c checksums.sha256
+); then
+	echo "ROLLBACK_ERROR|snapshot_checksum_verification_failed"
+	exit 30
+fi
 
 for target in "${TARGETS[@]}"; do
 	relative="${target#/}"
@@ -103,6 +124,11 @@ for target in "${TARGETS[@]}"; do
 	state="$(cat "$metadata")"
 
 	if [ "$state" = "present" ]; then
+		if [ ! -f "$content" ]; then
+			echo "ROLLBACK_ERROR|missing_snapshot_content|$target"
+			exit 33
+		fi
+
 		mkdir -p "$(dirname "$target")"
 		cp -a "$content" "$target"
 	elif [ "$state" = "absent" ]; then
