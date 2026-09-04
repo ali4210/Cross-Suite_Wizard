@@ -111,12 +111,15 @@ exit ${PIPESTATUS[0]}
 		})
 	}
 
-	signedByPattern := regexp.MustCompile(`(?m)^([^:\n]+):([0-9]+):.*(?:signed-by|Signed-By)[=:]([^ \]\n]+)`)
-	for _, match := range signedByPattern.FindAllStringSubmatch(inventory, -1) {
-		sourceFile := strings.TrimSpace(match[1])
-		lineNumber := 0
-		_, _ = fmt.Sscanf(match[2], "%d", &lineNumber)
-		keyringPath := strings.TrimSpace(match[3])
+	for _, inventoryLine := range strings.Split(inventory, "\n") {
+		reference, ok := ParseAPTListSourceReference(inventoryLine)
+		if !ok {
+			continue
+		}
+
+		sourceFile := reference.SourceFile
+		lineNumber := reference.LineNumber
+		keyringPath := reference.KeyringPath
 
 		dedupKey := fmt.Sprintf("%s:%d:%s", sourceFile, lineNumber, keyringPath)
 		if sourceFile == "" || keyringPath == "" || seenMissingKeyrings[dedupKey] {
@@ -138,8 +141,8 @@ exit ${PIPESTATUS[0]}
 			repositoryURL = extractRepositoryURL(sourceLine)
 			repositoryName = repositoryNameFromURL(repositoryURL)
 		} else {
-			sourceLine = strings.TrimSpace(match[0])
-			repositoryURL = extractRepositoryURL(sourceLine)
+			sourceLine = reference.SourceLine
+			repositoryURL = reference.RepositoryURL
 			repositoryName = repositoryNameFromURL(repositoryURL)
 
 			profile, knownVendor := FindVendorProfile(ManagerAPT, repositoryURL)
