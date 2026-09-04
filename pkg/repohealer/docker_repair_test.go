@@ -151,3 +151,31 @@ func TestApplyKnownAPTRepairsAppliesDockerRepairAfterVerification(t *testing.T) 
 		t.Fatalf("final command must verify APT update:\n%s", exec.commands[2])
 	}
 }
+
+func TestApplyKnownAPTRepairsDoesNothingWhenNoFindingsExist(t *testing.T) {
+	exec := &fakeExecutor{}
+
+	result := dockerRepairResult()
+	result.Findings = nil
+
+	got := ApplyKnownAPTRepairs(exec, result)
+
+	if got.Attempted {
+		t.Fatal("no findings must not start a repair attempt")
+	}
+	if got.Applied {
+		t.Fatal("no findings must not apply a repair")
+	}
+	if got.RolledBack {
+		t.Fatal("no findings must not roll back")
+	}
+	if got.Error == nil {
+		t.Fatal("no findings must report that no eligible repair exists")
+	}
+	if len(exec.commands) != 0 {
+		t.Fatalf(
+			"no findings must not execute commands; got %d",
+			len(exec.commands),
+		)
+	}
+}
