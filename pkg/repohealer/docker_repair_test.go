@@ -106,3 +106,54 @@ func TestApplyKnownAPTRepairsRejectsDockerForUnsupportedSuite(t *testing.T) {
 		t.Fatalf("unsupported Docker suite must not execute commands, got %d", len(exec.commands))
 	}
 }
+
+func TestApplyKnownAPTRepairsAppliesDockerRepairAfterVerification(t *testing.T) {
+	exec := &fakeExecutor{
+		runSudoOutputs: []string{
+			"",
+			"",
+		},
+		runSudoLabelOutputs: []string{
+			"REPAIR_APPLIED|docker-ce|fingerprint=9DC858229FC7DD38854AE2D88D81803C0EBFCD88",
+		},
+	}
+
+	got := ApplyKnownAPTRepairs(exec, dockerRepairResult())
+
+	if !got.Attempted {
+		t.Fatal("expected Docker repair attempt")
+	}
+	if !got.Applied {
+		t.Fatalf("expected Docker repair to apply, got error: %v", got.Error)
+	}
+	if got.RolledBack {
+		t.Fatal("successful Docker repair must not roll back")
+	}
+	if got.Error != nil {
+		t.Fatalf("successful Docker repair returned error: %v", got.Error)
+	}
+	if got.ProfileID != "docker-ce" {
+		t.Fatalf("profile ID = %q, want docker-ce", got.ProfileID)
+	}
+	if got.Fingerprint != "9DC858229FC7DD38854AE2D88D81803C0EBFCD88" {
+		t.Fatalf(
+			"fingerprint = %q, want accepted Docker fingerprint",
+			got.Fingerprint,
+		)
+	}
+	if len(exec.commands) != 3 {
+		t.Fatalf(
+			"expected snapshot, repair, and verification commands; got %d",
+			len(exec.commands),
+		)
+	}
+	if !strings.Contains(exec.commands[0], "SUDO:") {
+		t.Fatalf("first command must create snapshot: %s", exec.commands[0])
+	}
+	if !strings.Contains(exec.commands[1], `PROFILE_ID="docker-ce"`) {
+		t.Fatalf("repair command does not target Docker:\n%s", exec.commands[1])
+	}
+	if !strings.Contains(exec.commands[2], "apt-get update") {
+		t.Fatalf("final command must verify APT update:\n%s", exec.commands[2])
+	}
+}
