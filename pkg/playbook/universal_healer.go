@@ -53,7 +53,7 @@ func ShowUniversalHealerMenu(reader *bufio.Reader, client *ssh.Client, targetOS 
 		} else {
 			fmt.Println("  [5] Enterprise Repo Switcher (Fix EOL CentOS / Enable, Disable & Purge Repos)")
 			fmt.Println("  [6] Inject Custom Private Repository Endpoint (RPM / APT / Nexus Preset Governance)")
-			fmt.Println("  [7] Autonomous System Self-Healer (Clear Locks, Dpkg Errors & Missing GPG Keys)")
+			fmt.Println("  [7] Universal Repository Healer (Diagnose, Plan & Verified Repair)")
 			fmt.Println("  [8] Run Fast-Mirror Benchmark & Auto-Tune Repository Download Speeds")
 			fmt.Println("  [9] Rollback Repository & System Package State (Restore Snapshot)")
 		}
