@@ -29,7 +29,7 @@ func TestRenderMicrosoftVSCodeAPTSource(t *testing.T) {
 	}
 }
 
-func TestRenderDockerAPTSourceForParrotLory(t *testing.T) {
+func TestRenderDockerAPTSourceForParrot64LoryUsesBookworm(t *testing.T) {
 	profile, ok := FindVendorProfile(
 		ManagerAPT,
 		"https://download.docker.com/linux/debian",
@@ -40,7 +40,8 @@ func TestRenderDockerAPTSourceForParrotLory(t *testing.T) {
 
 	got, err := RenderAPTSource(profile, SourceRenderInput{
 		Architecture: "amd64",
-		Distribution: "parrot",
+		Distribution: "debian",
+		Version:      "6.4",
 		Codename:     "lory",
 	})
 	if err != nil {
@@ -114,5 +115,25 @@ func TestRenderDockerAPTSourceRejectsUnsupportedDistribution(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected Ubuntu to be rejected for Docker Debian profile")
+	}
+}
+
+func TestRenderDockerAPTSourceRejectsUnknownParrotLoryVersion(t *testing.T) {
+	profile, ok := FindVendorProfile(
+		ManagerAPT,
+		"https://download.docker.com/linux/debian",
+	)
+	if !ok {
+		t.Fatal("expected Docker profile")
+	}
+
+	_, err := RenderAPTSource(profile, SourceRenderInput{
+		Architecture: "amd64",
+		Distribution: "debian",
+		Version:      "6.5",
+		Codename:     "lory",
+	})
+	if err == nil {
+		t.Fatal("expected unknown Parrot lory version to be rejected")
 	}
 }

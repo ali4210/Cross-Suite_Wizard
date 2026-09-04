@@ -52,7 +52,14 @@ func RenderAPTSource(profile VendorProfile, input SourceRenderInput) (string, er
 
 func ResolveDockerDebianSuite(input SourceRenderInput) (string, error) {
 	distribution := strings.ToLower(strings.TrimSpace(input.Distribution))
+	version := strings.TrimSpace(input.Version)
 	codename := strings.ToLower(strings.TrimSpace(input.Codename))
+
+	// Parrot Security 6.4 (Lorikeet) identifies itself as Debian with
+	// VERSION_CODENAME=lory. Its Docker CE repository must use Debian 12 Bookworm.
+	if distribution == "debian" && version == "6.4" && codename == "lory" {
+		return "bookworm", nil
+	}
 
 	if distribution == "debian" {
 		switch codename {
