@@ -126,6 +126,8 @@ exit ${PIPESTATUS[0]}
 			continue
 		}
 
+		seenMissingKeyrings[dedupKey] = true
+
 		keyringCheck := fmt.Sprintf(`[ -r %q ] && echo PRESENT || echo MISSING`, keyringPath)
 		keyringOutput := runSudo(keyringCheck)
 
@@ -173,8 +175,6 @@ exit ${PIPESTATUS[0]}
 
 			continue
 		}
-
-		seenMissingKeyrings[dedupKey] = true
 
 		finding := Finding{
 			Code:            "APT_KEYRING_PATH_MISSING",
