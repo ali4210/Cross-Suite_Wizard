@@ -8,7 +8,9 @@ import (
 func TestAPTAdapterDiagnoseFindsKnownDockerKeyringBindingMismatch(t *testing.T) {
 	exec := &fakeExecutor{
 		runSudoOutputs: []string{
-			`=== SIGNED_BY_REFERENCES ===
+			`=== APT_SOURCES ===
+/etc/apt/sources.list.d/docker.list:1:deb [arch=amd64 signed-by=/etc/apt/keyrings/old-docker.gpg] https://download.docker.com/linux/debian bookworm stable
+=== SIGNED_BY_REFERENCES ===
 /etc/apt/sources.list.d/docker.list:1:deb [arch=amd64 signed-by=/etc/apt/keyrings/old-docker.gpg] https://download.docker.com/linux/debian bookworm stable
 === KEYRINGS ===
 /etc/apt/keyrings/old-docker.gpg	644	root:root
