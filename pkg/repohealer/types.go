@@ -82,14 +82,26 @@ type Finding struct {
 }
 
 type RepairAction struct {
-	ID              string    `json:"id"`
-	FindingCode     string    `json:"finding_code"`
-	Risk            RiskLevel `json:"risk"`
-	Description     string    `json:"description"`
-	Commands        []string  `json:"commands"`
-	Verification    []string  `json:"verification"`
-	Rollback        []string  `json:"rollback"`
-	RequiresConsent bool      `json:"requires_consent"`
+	ID                   string      `json:"id"`
+	FindingCode          string      `json:"finding_code"`
+	Risk                 RiskLevel   `json:"risk"`
+	Description          string      `json:"description"`
+	Commands             []string    `json:"commands"`
+	Verification         []string    `json:"verification"`
+	Rollback             []string    `json:"rollback"`
+	RequiresConsent      bool        `json:"requires_consent"`
+	Eligible             bool        `json:"eligible"`
+	BlockReason          string      `json:"block_reason,omitempty"`
+	ProfileID            string      `json:"profile_id,omitempty"`
+	ProfileDisplayName   string      `json:"profile_display_name,omitempty"`
+	RepositoryURL        string      `json:"repository_url,omitempty"`
+	Target               TargetFacts `json:"target"`
+	KeyURL               string      `json:"key_url,omitempty"`
+	ExpectedFingerprints []string    `json:"expected_fingerprints,omitempty"`
+	KeyringPath          string      `json:"keyring_path,omitempty"`
+	SourceFile           string      `json:"source_file,omitempty"`
+	RenderedSource       string      `json:"rendered_source,omitempty"`
+	SnapshotTargets      []string    `json:"snapshot_targets,omitempty"`
 }
 
 type Snapshot struct {

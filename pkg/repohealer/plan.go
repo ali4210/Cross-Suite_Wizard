@@ -1,6 +1,9 @@
 package repohealer
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 func BuildRepairPlan(result Result) []RepairAction {
 	actions := make([]RepairAction, 0)
@@ -18,33 +21,68 @@ func BuildRepairPlan(result Result) []RepairAction {
 
 		seenProfiles[profile.ID] = true
 
-		actions = append(actions, RepairAction{
-			ID:          "apt-keyring-repair-" + profile.ID,
-			FindingCode: finding.Code,
-			Risk:        RiskKnownVendor,
-			Description: fmt.Sprintf(
-				"Restore the missing repository-scoped keyring for %s and rewrite only %s.",
-				profile.DisplayName,
+		action := RepairAction{
+			ID:                   "apt-keyring-repair-" + profile.ID,
+			FindingCode:          finding.Code,
+			Risk:                 RiskKnownVendor,
+			Description:          fmt.Sprintf("Prepare a repository-scoped APT trust repair plan for %s.", profile.DisplayName),
+			Commands:             []string{},
+			Verification:         []string{"apt-get update"},
+			Rollback:             []string{"Restore only the profile source/keyring files from the pre-repair snapshot."},
+			RequiresConsent:      true,
+			Eligible:             true,
+			ProfileID:            profile.ID,
+			ProfileDisplayName:   profile.DisplayName,
+			RepositoryURL:        finding.RepositoryURL,
+			Target:               result.Target,
+			KeyURL:               profile.KeyURL,
+			ExpectedFingerprints: append([]string(nil), profile.ExpectedFingerprints...),
+			KeyringPath:          profile.KeyringPath,
+			SourceFile:           profile.SourceFile,
+			SnapshotTargets: []string{
 				profile.SourceFile,
-			),
-			Commands: []string{
-				"Create a targeted APT source/keyring snapshot before mutation.",
-				"Create /etc/apt/keyrings with mode 0755 if missing.",
-				"Download the pinned key from: " + profile.KeyURL,
-				"Verify the downloaded key against the profile's full GPG fingerprint list.",
-				"Write keyring: " + profile.KeyringPath,
-				"Render an architecture-aware and profile-validated source file: " + profile.SourceFile,
-				"Run apt-get update for final verification.",
+				profile.KeyringPath,
 			},
-			Verification: []string{
-				"apt-get update",
-				"Confirm the repository authentication error no longer appears.",
-			},
-			Rollback: []string{
-				"Restore only the profile source/keyring files from the pre-repair snapshot.",
-			},
-			RequiresConsent: true,
+		}
+
+		renderedSource, err := RenderAPTSource(profile, SourceRenderInput{
+			Architecture: result.Target.Architecture,
+			Distribution: result.Target.Distribution,
+			Version:      result.Target.Version,
+			Codename:     result.Target.Codename,
 		})
+		if err != nil {
+			action.Risk = RiskBlocked
+			action.Description = fmt.Sprintf(
+				"APT repair for %s is blocked before execution.",
+				profile.DisplayName,
+			)
+			action.Commands = nil
+			action.RequiresConsent = false
+			action.Eligible = false
+			action.BlockReason = strings.TrimSpace(err.Error())
+			actions = append(actions, action)
+			continue
+		}
+
+		action.RenderedSource = renderedSource
+		action.Description = fmt.Sprintf(
+			"Restore the missing repository-scoped keyring for %s and rewrite only %s.",
+			profile.DisplayName,
+			profile.SourceFile,
+		)
+		action.Commands = []string{
+			"Create a targeted APT source/keyring snapshot before mutation.",
+			"Create /etc/apt/keyrings with mode 0755 if missing.",
+			"Download the pinned key from: " + profile.KeyURL,
+			"Verify the downloaded key against the profile's full GPG fingerprint list.",
+			"Write keyring: " + profile.KeyringPath,
+			"Write rendered source file: " + profile.SourceFile,
+			"Rendered source: " + renderedSource,
+			"Run apt-get update for final verification.",
+		}
+
+		actions = append(actions, action)
 	}
 
 	return actions
