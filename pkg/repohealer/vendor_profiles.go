@@ -23,11 +23,13 @@ func KnownVendorProfiles() []VendorProfile {
 			AllowedURLPrefixes: []string{
 				"https://packages.microsoft.com/repos/code",
 			},
-			KeyURL:               "https://packages.microsoft.com/keys/microsoft.asc",
-			KeyringPath:          "/etc/apt/keyrings/microsoft.gpg",
-			ExpectedFingerprints: []string{},
-			SourceFile:           "/etc/apt/sources.list.d/vscode.list",
-			SourceLine:           "deb [arch=amd64,arm64,armhf signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/code stable main",
+			KeyURL:      "https://packages.microsoft.com/keys/microsoft.asc",
+			KeyringPath: "/etc/apt/keyrings/microsoft.gpg",
+			ExpectedFingerprints: []string{
+				"BC528686B50D79E339D3721CEB3E94ADBE1229CF",
+			},
+			SourceFile: "/etc/apt/sources.list.d/vscode.list",
+			SourceLine: "deb [arch=amd64,arm64,armhf signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/code stable main",
 		},
 	}
 }
@@ -46,4 +48,16 @@ func FindVendorProfile(manager PackageManager, repositoryURL string) (VendorProf
 	}
 
 	return VendorProfile{}, false
+}
+
+func IsPinnedFingerprint(profile VendorProfile, fingerprint string) bool {
+	normalized := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(fingerprint), " ", ""))
+
+	for _, expected := range profile.ExpectedFingerprints {
+		if normalized == strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(expected), " ", "")) {
+			return true
+		}
+	}
+
+	return false
 }

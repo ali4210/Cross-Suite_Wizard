@@ -19,3 +19,14 @@ func DefaultDiagnosticPolicy() Policy {
 		AllowMutation:     false,
 	}
 }
+
+func DefaultKnownVendorRepairPolicy() Policy {
+	return Policy{
+		Mode:              ModeApply,
+		CollectJournal:    true,
+		KnownVendorsOnly:  true,
+		RequireConsent:    true,
+		VerifyAfterRepair: true,
+		AllowMutation:     true,
+	}
+}

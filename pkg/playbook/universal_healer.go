@@ -2170,11 +2170,35 @@ func (e repoHealerExecutor) RunSudoWithLabel(script, label string) (string, erro
 }
 
 // RunSelfHealingTroubleshooter runs the universal repository healer backend.
-// Phase 1 is diagnostic-only: it makes no system or repository changes.
 func RunSelfHealingTroubleshooter(client *ssh.Client, targetOS osdetect.TargetOS) {
-	fmt.Println(Cyan + Bold + "\n[+] Launching Universal Repository Healer in DIAGNOSTIC-ONLY mode..." + Reset)
+	fmt.Println(Cyan + Bold + "\n[+] Launching Universal Repository Healer..." + Reset)
+
+	fmt.Println(Blue + "--------------------------------------------------------------------------------" + Reset)
+	fmt.Println("  [1] Diagnose repository health only (no system changes)")
+	fmt.Println("  [2] Diagnose and apply recognized known-vendor repairs")
+	fmt.Println(Red + "  [0] Return to Hub 5 Menu" + Reset)
+	fmt.Println(Blue + "--------------------------------------------------------------------------------" + Reset)
+
+	modeChoice := strings.TrimSpace(
+		transfer.ReadRealtimeInput("Select mode [0-2, default: 1]: "),
+	)
+
+	if modeChoice == "" {
+		modeChoice = "1"
+	}
+
+	if modeChoice == "0" ||
+		strings.EqualFold(modeChoice, "q") ||
+		strings.EqualFold(modeChoice, "back") {
+		fmt.Println(Yellow + "[!] Repository healer canceled. No system changes were made." + Reset)
+		return
+	}
 
 	policy := repohealer.DefaultDiagnosticPolicy()
+	if modeChoice == "2" {
+		policy = repohealer.DefaultKnownVendorRepairPolicy()
+	}
+
 	engine := repohealer.New(
 		repoHealerExecutor{client: client},
 		targetOS,
@@ -2190,11 +2214,67 @@ func RunSelfHealingTroubleshooter(client *ssh.Client, targetOS osdetect.TargetOS
 		fmt.Println(Yellow + Bold + report + Reset)
 	}
 
-	fmt.Println(
-		Yellow +
-			"[SAFE MODE] No repository, keyring, package, cache, lock, or system configuration was changed." +
-			Reset,
+	if modeChoice != "2" {
+		fmt.Println(
+			Yellow +
+				"[SAFE MODE] No repository, keyring, package, cache, lock, or system configuration was changed." +
+				Reset,
+		)
+		return
+	}
+
+	if len(result.Actions) == 0 {
+		fmt.Println(
+			Yellow +
+				"[!] No eligible known-vendor repair actions were found. No system changes were made." +
+				Reset,
+		)
+		return
+	}
+
+	fmt.Println(Red + Bold + "\n[!] APPLY MODE: This will modify only a verified known-vendor repository configuration." + Reset)
+	fmt.Println(Yellow + "    A pre-repair snapshot will be created before any modification." + Reset)
+
+	confirmation := strings.TrimSpace(
+		transfer.ReadRealtimeInput("Apply the displayed known-vendor repair plan now? [y/N]: "),
 	)
+
+	if !strings.EqualFold(confirmation, "y") && !strings.EqualFold(confirmation, "yes") {
+		fmt.Println(Yellow + "[!] Repair canceled by user. No system changes were made." + Reset)
+		return
+	}
+
+	repairResult := repohealer.ApplyKnownAPTRepairs(
+		repoHealerExecutor{client: client},
+		result,
+	)
+
+	if repairResult.Applied {
+		fmt.Println(Green + Bold + "\n[SUCCESS] Verified known-vendor repository repair completed." + Reset)
+		fmt.Println(Green + "Snapshot: " + repairResult.Snapshot.Path + Reset)
+		fmt.Println(Green + "Repair output: " + repairResult.Output + Reset)
+		fmt.Println(Green + "APT verification completed successfully." + Reset)
+		return
+	}
+
+	if repairResult.RolledBack {
+		fmt.Println(Red + Bold + "\n[ROLLBACK COMPLETED] Post-repair verification failed; the APT source/keyring snapshot was restored." + Reset)
+		fmt.Println(Red + "Snapshot: " + repairResult.Snapshot.Path + Reset)
+	} else {
+		fmt.Println(Red + Bold + "\n[BLOCKED] Known-vendor repair was not applied." + Reset)
+	}
+
+	if repairResult.Error != nil {
+		fmt.Println(Red + "Reason: " + repairResult.Error.Error() + Reset)
+	}
+
+	if strings.TrimSpace(repairResult.Output) != "" {
+		fmt.Println(Yellow + "\nRepair output:\n" + repairResult.Output + Reset)
+	}
+
+	if strings.TrimSpace(repairResult.VerificationOut) != "" {
+		fmt.Println(Yellow + "\nAPT verification output:\n" + repairResult.VerificationOut + Reset)
+	}
 }
 
 // InspectFootprintState reads state.json and displays it inside a scrollable pager view
