@@ -11,8 +11,6 @@ func BuildRepairPlan(result Result) []RepairAction {
 
 	for _, finding := range result.Findings {
 		if !IsKnownAPTRepairFinding(finding.Code) {
-    continue
-} {
 			continue
 		}
 
@@ -24,7 +22,7 @@ func BuildRepairPlan(result Result) []RepairAction {
 		seenProfiles[profile.ID] = true
 
 		action := RepairAction{
-			ID:                   "apt-keyring-repair-" + profile.ID,
+			ID:                   APTRepairActionID(profile.ID, finding.Code),
 			FindingCode:          finding.Code,
 			Risk:                 RiskKnownVendor,
 			Description:          fmt.Sprintf("Prepare a repository-scoped APT trust repair plan for %s.", profile.DisplayName),
