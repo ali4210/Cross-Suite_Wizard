@@ -2158,7 +2158,7 @@ func runRepoHealerSudo(client *ssh.Client, rawBashCmd string) (string, error) {
 	encodedScript := base64.StdEncoding.EncodeToString([]byte(sanitizedCmd))
 
 	command := fmt.Sprintf(
-		"echo %s | base64 -d | sudo -n -E bash",
+		"sudo -n -E bash -c 'echo %s | base64 -d | bash'",
 		encodedScript,
 	)
 
@@ -2174,7 +2174,7 @@ func runRepoHealerSudoWithSpinner(
 	encodedScript := base64.StdEncoding.EncodeToString([]byte(sanitizedCmd))
 
 	command := fmt.Sprintf(
-		"echo %s | base64 -d | sudo -n -E bash",
+		"sudo -n -E bash -c 'echo %s | base64 -d | bash'",
 		encodedScript,
 	)
 
