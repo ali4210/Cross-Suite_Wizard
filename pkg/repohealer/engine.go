@@ -37,6 +37,10 @@ func (e *Engine) Run() Result {
 
 	switch facts.PackageManager {
 	case ManagerAPT:
+		facts, aptFactsEvidence := CollectAPTFacts(e.exec, facts)
+		result.Target = facts
+		result.Evidence = append(result.Evidence, aptFactsEvidence)
+
 		adapter := APTAdapter{}
 		evidence, findings, actions := adapter.Diagnose(e.exec, facts, e.policy)
 		result.Evidence = append(result.Evidence, evidence...)
