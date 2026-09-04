@@ -22,6 +22,9 @@ func (APTAdapter) Diagnose(
 	var findings []Finding
 	var actions []RepairAction
 
+	seenKeyIDs := make(map[string]bool)
+	seenMissingKeyrings := make(map[string]bool)
+
 	runSudo := func(command string) string {
 		started := time.Now()
 		output, err := exec.RunSudo(command)
@@ -55,7 +58,7 @@ ps -p 1 -o comm= 2>/dev/null
 
 echo '=== APT_SOURCES ==='
 grep -RIn --include='*.list' --include='*.sources' \
-  -E '^[[:space:]]*(deb|Types:)' \
+  -E '^[[:space:]]*(deb|Types:|URIs:|Suites:|Components:|Architectures:|Signed-By:)' \
   /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null
 
 echo '=== SIGNED_BY_REFERENCES ==='
@@ -91,14 +94,18 @@ exit ${PIPESTATUS[0]}
 
 	noPubKeyPattern := regexp.MustCompile(`NO_PUBKEY[[:space:]]+([A-F0-9]+)`)
 	for _, match := range noPubKeyPattern.FindAllStringSubmatch(updateOutput, -1) {
-		keyID := match[1]
+		keyID := strings.TrimSpace(match[1])
+		if keyID == "" || seenKeyIDs[keyID] {
+			continue
+		}
+		seenKeyIDs[keyID] = true
 
 		findings = append(findings, Finding{
 			Code:            "APT_REPO_KEY_MISSING",
 			Severity:        SeverityError,
 			Risk:            RiskManual,
 			Evidence:        fmt.Sprintf("apt-get update reported NO_PUBKEY %s.", keyID),
-			RecommendedFix:  "Map the repository to a verified vendor profile before importing or rotating a signing key. Never retrieve an unknown key solely from a public keyserver.",
+			RecommendedFix:  "Identify the repository using this key, match it to a verified vendor profile, and restore only the pinned repository-specific keyring. Never retrieve an unknown key solely from a public keyserver.",
 			AutoRepairable:  false,
 			RequiresConsent: true,
 		})
@@ -111,22 +118,59 @@ exit ${PIPESTATUS[0]}
 		_, _ = fmt.Sscanf(match[2], "%d", &lineNumber)
 		keyringPath := strings.TrimSpace(match[3])
 
+		dedupKey := fmt.Sprintf("%s:%d:%s", sourceFile, lineNumber, keyringPath)
+		if sourceFile == "" || keyringPath == "" || seenMissingKeyrings[dedupKey] {
+			continue
+		}
+
 		keyringCheck := fmt.Sprintf(`[ -r %q ] && echo PRESENT || echo MISSING`, keyringPath)
 		keyringOutput := runSudo(keyringCheck)
 
-		if strings.Contains(keyringOutput, "MISSING") {
-			findings = append(findings, Finding{
-				Code:            "APT_KEYRING_PATH_MISSING",
-				Severity:        SeverityError,
-				Risk:            RiskManual,
-				SourceFile:      sourceFile,
-				SourceLine:      lineNumber,
-				Evidence:        fmt.Sprintf("Repository configuration references a missing or unreadable keyring: %s.", keyringPath),
-				RecommendedFix:  "Restore the keyring only through a verified vendor profile, then bind the repository with signed-by to a dedicated keyring under /etc/apt/keyrings.",
-				AutoRepairable:  false,
-				RequiresConsent: true,
+		if !strings.Contains(keyringOutput, "MISSING") {
+			continue
+		}
+
+		seenMissingKeyrings[dedupKey] = true
+
+		sourceLineOutput := runSudo(fmt.Sprintf(`sed -n '%dp' %q 2>/dev/null`, lineNumber, sourceFile))
+		sourceLine := strings.TrimSpace(sourceLineOutput)
+		repositoryURL := extractRepositoryURL(sourceLine)
+		repositoryName := repositoryNameFromURL(repositoryURL)
+
+		finding := Finding{
+			Code:            "APT_KEYRING_PATH_MISSING",
+			Severity:        SeverityError,
+			Risk:            RiskManual,
+			RepositoryName:  repositoryName,
+			RepositoryURL:   repositoryURL,
+			SourceFile:      sourceFile,
+			SourceLine:      lineNumber,
+			Evidence:        fmt.Sprintf("Repository configuration references a missing or unreadable keyring: %s.", keyringPath),
+			RecommendedFix:  "Restore the keyring only through a verified vendor profile, then bind the repository with signed-by to a dedicated keyring.",
+			AutoRepairable:  false,
+			RequiresConsent: true,
+		}
+
+		if isMicrosoftVSCodeRepo(repositoryURL) {
+			finding.RepositoryName = "Microsoft Visual Studio Code"
+			finding.Risk = RiskKnownVendor
+			finding.AutoRepairable = true
+			finding.RequiresConsent = false
+			finding.RecommendedFix = "A verified Microsoft VS Code profile can restore the Microsoft keyring and bind this repository to a dedicated keyring. Repair remains disabled until Phase 2 policy and fingerprint verification are implemented."
+
+			actions = append(actions, RepairAction{
+				ID:              "repair-apt-microsoft-vscode-keyring",
+				FindingCode:     finding.Code,
+				Risk:            RiskKnownVendor,
+				Description:     "Restore the missing Microsoft VS Code APT keyring through a pinned vendor profile and rewrite only the VS Code source signed-by path.",
+				Commands:        []string{"PENDING_PROFILE_CONTROLLED_REPAIR"},
+				Verification:    []string{"apt-get update"},
+				Rollback:        []string{"Restore the pre-repair APT source and keyring snapshot."},
+				RequiresConsent: false,
 			})
 		}
+
+		findings = append(findings, finding)
 	}
 
 	lowerUpdate := strings.ToLower(updateOutput)
@@ -219,4 +263,32 @@ exit ${PIPESTATUS[0]}
 	}
 
 	return evidence, findings, actions
+}
+
+func extractRepositoryURL(sourceLine string) string {
+	urlPattern := regexp.MustCompile(`https?://[^[:space:]]+`)
+	return urlPattern.FindString(sourceLine)
+}
+
+func repositoryNameFromURL(repositoryURL string) string {
+	switch {
+	case isMicrosoftVSCodeRepo(repositoryURL):
+		return "Microsoft Visual Studio Code"
+	case strings.Contains(repositoryURL, "download.docker.com"):
+		return "Docker"
+	case strings.Contains(repositoryURL, "apt.releases.hashicorp.com"):
+		return "HashiCorp"
+	case strings.Contains(repositoryURL, "packages.wazuh.com"):
+		return "Wazuh"
+	case strings.Contains(repositoryURL, "pkgs.k8s.io") || strings.Contains(repositoryURL, "packages.k8s.io"):
+		return "Kubernetes"
+	case strings.Contains(repositoryURL, "apt.puppet.com"):
+		return "Puppet"
+	default:
+		return "Unidentified APT Repository"
+	}
+}
+
+func isMicrosoftVSCodeRepo(repositoryURL string) bool {
+	return strings.HasPrefix(repositoryURL, "https://packages.microsoft.com/repos/code")
 }
