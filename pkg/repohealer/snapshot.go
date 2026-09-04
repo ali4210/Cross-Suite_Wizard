@@ -50,15 +50,17 @@ for target in "${TARGETS[@]}"; do
 	fi
 done
 
-{
-	sha256sum "$SNAPSHOT_DIR/manifest.txt"
+(
+	cd "$SNAPSHOT_DIR"
 
-	if find "$SNAPSHOT_DIR/files" -type f -print -quit | grep -q .; then
-		find "$SNAPSHOT_DIR/files" -type f -print0 \
+	sha256sum manifest.txt
+
+	if find files -type f -print -quit | grep -q .; then
+		find files -type f -print0 \
 			| sort -z \
 			| xargs -0 sha256sum
 	fi
-} > "$SNAPSHOT_DIR/checksums.sha256"
+) > "$SNAPSHOT_DIR/checksums.sha256"
 
 chmod 0600 "$SNAPSHOT_DIR/checksums.sha256"
 `,

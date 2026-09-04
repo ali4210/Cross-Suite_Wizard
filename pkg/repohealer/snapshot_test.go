@@ -45,8 +45,8 @@ func TestCreateAPTFileSnapshotRecordsPresentAndAbsentStates(t *testing.T) {
 		`printf 'present\n' > "$metadata"`,
 		`cp -a "$target" "$content"`,
 		`printf 'absent\n' > "$metadata"`,
-		`sha256sum "$SNAPSHOT_DIR/manifest.txt"`,
-		`find "$SNAPSHOT_DIR/files" -type f -print0`,
+		`sha256sum manifest.txt`,
+		`find files -type f -print0`,
 		`> "$SNAPSHOT_DIR/checksums.sha256"`,
 		`chmod 0600 "$SNAPSHOT_DIR/checksums.sha256"`,
 	} {
@@ -55,18 +55,15 @@ func TestCreateAPTFileSnapshotRecordsPresentAndAbsentStates(t *testing.T) {
 		}
 	}
 
-	if strings.Contains(command, `find "$SNAPSHOT_DIR" -type f`) {
-		t.Fatalf(
-			"snapshot checksum collection must be limited to manifest and payload files, not all snapshot files:\n%s",
-			command,
-		)
-	}
-
-	if strings.Contains(command, `! -path "$SNAPSHOT_DIR/checksums.sha256"`) {
-		t.Fatalf(
-			"snapshot implementation should not recursively walk the snapshot root:\n%s",
-			command,
-		)
+	for _, unexpected := range []string{
+		`find "$SNAPSHOT_DIR" -type f`,
+		`! -path "$SNAPSHOT_DIR/checksums.sha256"`,
+		`sha256sum "$SNAPSHOT_DIR/manifest.txt"`,
+		`find "$SNAPSHOT_DIR/files" -type f -print0`,
+	} {
+		if strings.Contains(command, unexpected) {
+			t.Fatalf("snapshot command must not contain %q:\n%s", unexpected, command)
+		}
 	}
 }
 
@@ -181,6 +178,7 @@ func TestRestoreAPTFileSnapshotRestoresPresentAndRemovesAbsentPaths(t *testing.T
 	for _, expected := range []string{
 		"SUDO:",
 		`test -d "$SNAPSHOT_DIR/files"`,
+		`test -f "$SNAPSHOT_DIR/manifest.txt"`,
 		`test -f "$SNAPSHOT_DIR/checksums.sha256"`,
 		`sha256sum --strict -c checksums.sha256`,
 		`ROLLBACK_ERROR|snapshot_checksum_verification_failed`,
