@@ -2153,6 +2153,34 @@ if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
 	fmt.Println(Green + Bold + "[SUCCESS] Windows Package Manager Bootstrap Sequence Completed!" + Reset)
 }
 
+func runRepoHealerSudo(client *ssh.Client, rawBashCmd string) (string, error) {
+	sanitizedCmd := sanitizeCommandForWindows(rawBashCmd)
+	cleanCmd := strings.ReplaceAll(sanitizedCmd, "'", "'"'"'")
+
+	command := fmt.Sprintf(
+		"sudo -n -E bash -c '%s'",
+		cleanCmd,
+	)
+
+	return executeRemoteCommand(client, command)
+}
+
+func runRepoHealerSudoWithSpinner(
+	client *ssh.Client,
+	rawBashCmd string,
+	label string,
+) (string, error) {
+	sanitizedCmd := sanitizeCommandForWindows(rawBashCmd)
+	cleanCmd := strings.ReplaceAll(sanitizedCmd, "'", "'"'"'")
+
+	command := fmt.Sprintf(
+		"sudo -n -E bash -c '%s'",
+		cleanCmd,
+	)
+
+	return executeRemoteCommandWithSpinner(client, command, label)
+}
+
 type repoHealerExecutor struct {
 	client *ssh.Client
 }
@@ -2162,11 +2190,11 @@ func (e repoHealerExecutor) Run(command string) (string, error) {
 }
 
 func (e repoHealerExecutor) RunSudo(script string) (string, error) {
-	return runSudoScript(e.client, script)
+	return runRepoHealerSudo(e.client, script)
 }
 
 func (e repoHealerExecutor) RunSudoWithLabel(script, label string) (string, error) {
-	return runSudoScriptWithSpinner(e.client, script, label)
+	return runRepoHealerSudoWithSpinner(e.client, script, label)
 }
 
 // RunSelfHealingTroubleshooter runs the universal repository healer backend.
