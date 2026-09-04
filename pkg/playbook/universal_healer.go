@@ -2155,11 +2155,11 @@ if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
 
 func runRepoHealerSudo(client *ssh.Client, rawBashCmd string) (string, error) {
 	sanitizedCmd := sanitizeCommandForWindows(rawBashCmd)
-	cleanCmd := strings.ReplaceAll(sanitizedCmd, "'", "'"'"'")
+	encodedScript := base64.StdEncoding.EncodeToString([]byte(sanitizedCmd))
 
 	command := fmt.Sprintf(
-		"sudo -n -E bash -c '%s'",
-		cleanCmd,
+		"echo %s | base64 -d | sudo -n -E bash",
+		encodedScript,
 	)
 
 	return executeRemoteCommand(client, command)
@@ -2171,11 +2171,11 @@ func runRepoHealerSudoWithSpinner(
 	label string,
 ) (string, error) {
 	sanitizedCmd := sanitizeCommandForWindows(rawBashCmd)
-	cleanCmd := strings.ReplaceAll(sanitizedCmd, "'", "'"'"'")
+	encodedScript := base64.StdEncoding.EncodeToString([]byte(sanitizedCmd))
 
 	command := fmt.Sprintf(
-		"sudo -n -E bash -c '%s'",
-		cleanCmd,
+		"echo %s | base64 -d | sudo -n -E bash",
+		encodedScript,
 	)
 
 	return executeRemoteCommandWithSpinner(client, command, label)
