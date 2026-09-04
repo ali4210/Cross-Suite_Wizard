@@ -164,8 +164,21 @@ func TestApplyKnownAPTRepairsRollsBackOnFingerprintMismatch(t *testing.T) {
 	if !strings.Contains(exec.commands[0], "SUDO:") {
 		t.Fatalf("first command must create snapshot: %s", exec.commands[0])
 	}
-	if !strings.Contains(exec.commands[1], "Restoring Microsoft VS Code APT Trust") {
-		t.Fatalf("second command must be repair attempt: %s", exec.commands[1])
+	profile, ok := FindVendorProfile(
+		ManagerAPT,
+		"https://packages.microsoft.com/repos/code",
+	)
+	if !ok {
+		t.Fatal("expected Microsoft VS Code vendor profile")
+	}
+
+	expectedLabel := "Restoring " + profile.DisplayName + " APT Trust"
+	if !strings.Contains(exec.commands[1], expectedLabel) {
+		t.Fatalf(
+			"second command must use the profile repair label %q: %s",
+			expectedLabel,
+			exec.commands[1],
+		)
 	}
 	if !strings.Contains(exec.commands[len(exec.commands)-1], "SUDO:") {
 		t.Fatalf("last command must be rollback: %s", exec.commands[len(exec.commands)-1])
