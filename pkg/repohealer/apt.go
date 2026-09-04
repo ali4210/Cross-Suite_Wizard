@@ -126,16 +126,52 @@ exit ${PIPESTATUS[0]}
 		keyringCheck := fmt.Sprintf(`[ -r %q ] && echo PRESENT || echo MISSING`, keyringPath)
 		keyringOutput := runSudo(keyringCheck)
 
-		if !strings.Contains(keyringOutput, "MISSING") {
+		keyringMissing := strings.Contains(keyringOutput, "MISSING")
+		sourceLineOutput := ""
+		sourceLine := ""
+		repositoryURL := ""
+		repositoryName := ""
+
+		if keyringMissing {
+			sourceLineOutput = runSudo(fmt.Sprintf(`sed -n '%dp' %q 2>/dev/null`, lineNumber, sourceFile))
+			sourceLine = strings.TrimSpace(sourceLineOutput)
+			repositoryURL = extractRepositoryURL(sourceLine)
+			repositoryName = repositoryNameFromURL(repositoryURL)
+		} else {
+			sourceLine = strings.TrimSpace(match[0])
+			repositoryURL = extractRepositoryURL(sourceLine)
+			repositoryName = repositoryNameFromURL(repositoryURL)
+
+			profile, knownVendor := FindVendorProfile(ManagerAPT, repositoryURL)
+			if knownVendor && !HasExpectedAPTKeyringBinding(profile, sourceLine) {
+				findings = append(findings, Finding{
+					Code:           "APT_SOURCE_KEYRING_MISMATCH",
+					Severity:       SeverityError,
+					Risk:           RiskKnownVendor,
+					RepositoryName: profile.DisplayName,
+					RepositoryURL:  repositoryURL,
+					SourceFile:     sourceFile,
+					SourceLine:     lineNumber,
+					Evidence: fmt.Sprintf(
+						"Repository source binds %s to %s, but the verified profile requires %s.",
+						profile.DisplayName,
+						keyringPath,
+						profile.KeyringPath,
+					),
+					RecommendedFix: fmt.Sprintf(
+						"After explicit approval, restore only the verified %s keyring and rewrite %s with the profile-scoped signed-by binding.",
+						profile.DisplayName,
+						profile.SourceFile,
+					),
+					AutoRepairable:  true,
+					RequiresConsent: true,
+				})
+			}
+
 			continue
 		}
 
 		seenMissingKeyrings[dedupKey] = true
-
-		sourceLineOutput := runSudo(fmt.Sprintf(`sed -n '%dp' %q 2>/dev/null`, lineNumber, sourceFile))
-		sourceLine := strings.TrimSpace(sourceLineOutput)
-		repositoryURL := extractRepositoryURL(sourceLine)
-		repositoryName := repositoryNameFromURL(repositoryURL)
 
 		finding := Finding{
 			Code:            "APT_KEYRING_PATH_MISSING",
