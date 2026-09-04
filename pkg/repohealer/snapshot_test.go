@@ -39,6 +39,7 @@ func TestCreateAPTFileSnapshotRecordsPresentAndAbsentStates(t *testing.T) {
 	for _, expected := range []string{
 		"SUDO:",
 		`TARGETS=("/etc/apt/sources.list.d/docker.list" "/etc/apt/keyrings/docker.gpg")`,
+		`install -d -m 0700 "$SNAPSHOT_DIR"`,
 		`install -d -m 0700 "$SNAPSHOT_DIR/files"`,
 		`chmod 0600 "$SNAPSHOT_DIR/manifest.txt"`,
 		`if [ -e "$target" ]; then`,

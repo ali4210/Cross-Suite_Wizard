@@ -20,6 +20,7 @@ set -eu
 SNAPSHOT_DIR=%s
 TARGETS=(%s)
 
+install -d -m 0700 "$SNAPSHOT_DIR"
 install -d -m 0700 "$SNAPSHOT_DIR/files"
 
 cat > "$SNAPSHOT_DIR/manifest.txt" <<'MANIFEST'
