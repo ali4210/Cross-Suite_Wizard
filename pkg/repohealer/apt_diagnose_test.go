@@ -51,8 +51,8 @@ func TestAPTAdapterDiagnoseFindsKnownDockerKeyringBindingMismatch(t *testing.T) 
 	if !found {
 		t.Fatalf("expected Docker keyring binding mismatch; findings: %#v", findings)
 	}
-	if mismatch.RepositoryName != "Docker" {
-		t.Fatalf("repository name = %q, want Docker", mismatch.RepositoryName)
+	if mismatch.RepositoryName != "Docker CE" {
+		t.Fatalf("repository name = %q, want Docker CE", mismatch.RepositoryName)
 	}
 	if mismatch.RepositoryURL != "https://download.docker.com/linux/debian" {
 		t.Fatalf("repository URL = %q", mismatch.RepositoryURL)
