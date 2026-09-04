@@ -11,43 +11,69 @@ type RepairResult struct {
 	Applied         bool
 	RolledBack      bool
 	Snapshot        Snapshot
+	ProfileID       string
 	Output          string
 	VerificationOut string
 	Error           error
 }
 
 func ApplyKnownAPTRepairs(exec Executor, result Result) RepairResult {
-	repairResult := RepairResult{
-		Attempted: true,
-	}
-
 	for _, finding := range result.Findings {
 		if finding.Code != "APT_KEYRING_PATH_MISSING" {
 			continue
 		}
 
 		profile, ok := FindVendorProfile(ManagerAPT, finding.RepositoryURL)
-		if !ok || profile.ID != "microsoft-vscode" {
+		if !ok {
 			continue
 		}
 
-		return applyMicrosoftVSCodeAPTRepair(exec, profile)
+		return applyKnownAPTProfileRepair(exec, result.Target, profile)
 	}
 
-	repairResult.Attempted = false
-	repairResult.Error = fmt.Errorf("no eligible known-vendor APT repair was found")
-	return repairResult
+	return RepairResult{
+		Attempted: false,
+		Error:     fmt.Errorf("no eligible known-vendor APT repair was found"),
+	}
 }
 
-func applyMicrosoftVSCodeAPTRepair(exec Executor, profile VendorProfile) RepairResult {
+func applyKnownAPTProfileRepair(
+	exec Executor,
+	facts TargetFacts,
+	profile VendorProfile,
+) RepairResult {
 	repairResult := RepairResult{
 		Attempted: true,
+		ProfileID: profile.ID,
+	}
+
+	if profile.PackageManager != ManagerAPT {
+		repairResult.Error = fmt.Errorf(
+			"repair blocked: profile %q is not an APT profile",
+			profile.ID,
+		)
+		return repairResult
 	}
 
 	if len(profile.ExpectedFingerprints) == 0 {
 		repairResult.Error = fmt.Errorf(
 			"repair blocked: %s has no pinned signing-key fingerprint",
 			profile.ID,
+		)
+		return repairResult
+	}
+
+	sourceLine, err := RenderAPTSource(profile, SourceRenderInput{
+		Architecture: facts.Architecture,
+		Distribution: facts.Distribution,
+		Version:      facts.Version,
+		Codename:     facts.Codename,
+	})
+	if err != nil {
+		repairResult.Error = fmt.Errorf(
+			"repair blocked: unable to render source for %s: %w",
+			profile.DisplayName,
+			err,
 		)
 		return repairResult
 	}
@@ -67,8 +93,11 @@ func applyMicrosoftVSCodeAPTRepair(exec Executor, profile VendorProfile) RepairR
 	}
 	repairResult.Snapshot = snapshot
 
-	timestamp := time.Now().UTC().UnixNano()
-	tempDir := fmt.Sprintf("/var/tmp/cross-suite-repoheal-%d", timestamp)
+	tempDir := fmt.Sprintf(
+		"/var/tmp/cross-suite-repoheal-%s-%d",
+		profile.ID,
+		time.Now().UTC().UnixNano(),
+	)
 
 	script := fmt.Sprintf(`
 set -eu
@@ -77,8 +106,9 @@ PROFILE_ID=%q
 KEY_URL=%q
 KEYRING_PATH=%q
 SOURCE_FILE=%q
+SOURCE_LINE=%q
 TEMP_DIR=%q
-EXPECTED_FINGERPRINT=%q
+EXPECTED_FINGERPRINTS=(%s)
 
 cleanup() {
 	rm -rf "$TEMP_DIR"
@@ -92,72 +122,75 @@ export GNUPGHOME="$TEMP_DIR/gnupg"
 mkdir -p "$GNUPGHOME"
 chmod 0700 "$GNUPGHOME"
 
-APT_ARCH="$(dpkg --print-architecture)"
-if [ -z "$APT_ARCH" ]; then
-	echo "REPAIR_ERROR|could_not_determine_apt_architecture"
-	exit 20
-fi
-
 curl -fsSL --proto '=https' --tlsv1.2 "$KEY_URL" \
-	-o "$TEMP_DIR/microsoft.asc"
+	-o "$TEMP_DIR/vendor.asc"
 
-test -s "$TEMP_DIR/microsoft.asc"
+test -s "$TEMP_DIR/vendor.asc"
 
-ACTUAL_FINGERPRINT="$(
-	gpg --show-keys --with-colons --fingerprint "$TEMP_DIR/microsoft.asc" \
-	| awk -F: '$1 == "fpr" {print toupper($10); exit}'
-)"
+MATCHED_FINGERPRINT=""
+while IFS= read -r fingerprint; do
+	[ -z "$fingerprint" ] && continue
 
-if [ -z "$ACTUAL_FINGERPRINT" ]; then
-	echo "REPAIR_ERROR|could_not_extract_fingerprint"
-	exit 21
-fi
+	for expected in "${EXPECTED_FINGERPRINTS[@]}"; do
+		if [ "$fingerprint" = "$expected" ]; then
+			MATCHED_FINGERPRINT="$fingerprint"
+			break 2
+		fi
+	done
+done < <(
+	gpg --show-keys --with-colons --fingerprint "$TEMP_DIR/vendor.asc" \
+	| awk -F: '$1 == "fpr" {print toupper($10)}'
+)
 
-if [ "$ACTUAL_FINGERPRINT" != "$EXPECTED_FINGERPRINT" ]; then
-	echo "REPAIR_ERROR|fingerprint_mismatch|expected=$EXPECTED_FINGERPRINT|actual=$ACTUAL_FINGERPRINT"
+if [ -z "$MATCHED_FINGERPRINT" ]; then
+	echo "REPAIR_ERROR|fingerprint_mismatch|profile=$PROFILE_ID"
 	exit 22
 fi
 
 gpg --dearmor --yes \
-	--output "$TEMP_DIR/microsoft.gpg" \
-	"$TEMP_DIR/microsoft.asc"
+	--output "$TEMP_DIR/vendor.gpg" \
+	"$TEMP_DIR/vendor.asc"
 
-test -s "$TEMP_DIR/microsoft.gpg"
+test -s "$TEMP_DIR/vendor.gpg"
 
 install -o root -g root -m 0644 \
-	"$TEMP_DIR/microsoft.gpg" \
+	"$TEMP_DIR/vendor.gpg" \
 	"$KEYRING_PATH"
 
-printf 'deb [arch=%%s signed-by=%%s] %%s stable main\n' \
-	"$APT_ARCH" \
-	"$KEYRING_PATH" \
-	"https://packages.microsoft.com/repos/code" \
-	> "$TEMP_DIR/vscode.list"
+printf '%%s\n' "$SOURCE_LINE" > "$TEMP_DIR/source.list"
 
 install -o root -g root -m 0644 \
-	"$TEMP_DIR/vscode.list" \
+	"$TEMP_DIR/source.list" \
 	"$SOURCE_FILE"
 
-echo "REPAIR_APPLIED|$PROFILE_ID|fingerprint=$ACTUAL_FINGERPRINT|arch=$APT_ARCH"
+echo "REPAIR_APPLIED|$PROFILE_ID|fingerprint=$MATCHED_FINGERPRINT"
 `,
 		profile.ID,
 		profile.KeyURL,
 		profile.KeyringPath,
 		profile.SourceFile,
+		sourceLine,
 		tempDir,
-		profile.ExpectedFingerprints[0],
+		shellArray(profile.ExpectedFingerprints),
 	)
 
 	output, err := exec.RunSudoWithLabel(
 		script,
-		"Restoring Microsoft VS Code APT Trust",
+		"Restoring "+profile.DisplayName+" APT Trust",
 	)
 	repairResult.Output = strings.TrimSpace(output)
 
 	if err != nil || !strings.Contains(output, "REPAIR_APPLIED|") {
 		repairResult.Error = fmt.Errorf("keyring/source repair failed: %w", err)
-		_ = RestoreAPTFileSnapshot(exec, snapshot, snapshotTargets)
-		repairResult.RolledBack = true
+		rollbackErr := RestoreAPTFileSnapshot(exec, snapshot, snapshotTargets)
+		repairResult.RolledBack = rollbackErr == nil
+		if rollbackErr != nil {
+			repairResult.Error = fmt.Errorf(
+				"%w; targeted rollback also failed: %v",
+				repairResult.Error,
+				rollbackErr,
+			)
+		}
 		return repairResult
 	}
 
@@ -174,7 +207,7 @@ exit ${PIPESTATUS[0]}
 	repairResult.VerificationOut = strings.TrimSpace(verificationOut)
 
 	if verifyErr != nil ||
-		strings.Contains(verificationOut, "NO_PUBKEY EB3E94ADBE1229CF") ||
+		strings.Contains(verificationOut, "NO_PUBKEY") ||
 		strings.Contains(verificationOut, "BADSIG") ||
 		strings.Contains(verificationOut, "EXPKEYSIG") ||
 		strings.Contains(verificationOut, "Failed to fetch") {
@@ -182,8 +215,15 @@ exit ${PIPESTATUS[0]}
 			"post-repair APT verification failed: %w",
 			verifyErr,
 		)
-		_ = RestoreAPTFileSnapshot(exec, snapshot, snapshotTargets)
-		repairResult.RolledBack = true
+		rollbackErr := RestoreAPTFileSnapshot(exec, snapshot, snapshotTargets)
+		repairResult.RolledBack = rollbackErr == nil
+		if rollbackErr != nil {
+			repairResult.Error = fmt.Errorf(
+				"%w; targeted rollback also failed: %v",
+				repairResult.Error,
+				rollbackErr,
+			)
+		}
 		return repairResult
 	}
 

@@ -76,6 +76,10 @@ func microsoftRepairResult() Result {
 	return Result{
 		Target: TargetFacts{
 			Platform:       PlatformLinux,
+			Distribution:   "parrot",
+			Version:        "6.4",
+			Codename:       "lory",
+			Architecture:   "amd64",
 			PackageManager: ManagerAPT,
 		},
 		Findings: []Finding{
@@ -93,6 +97,10 @@ func TestApplyKnownAPTRepairsReturnsNoActionForUnknownFinding(t *testing.T) {
 	result := Result{
 		Target: TargetFacts{
 			Platform:       PlatformLinux,
+			Distribution:   "parrot",
+			Version:        "6.4",
+			Codename:       "lory",
+			Architecture:   "amd64",
 			PackageManager: ManagerAPT,
 		},
 		Findings: []Finding{
@@ -205,5 +213,67 @@ func TestApplyKnownAPTRepairsRollsBackOnAPTVerificationFailure(t *testing.T) {
 	}
 	if !strings.Contains(exec.commands[len(exec.commands)-1], "SUDO:") {
 		t.Fatalf("last command must be rollback: %s", exec.commands[len(exec.commands)-1])
+	}
+}
+
+func TestDockerRepairUsesAllPinnedFingerprints(t *testing.T) {
+	profile, ok := FindVendorProfile(
+		ManagerAPT,
+		"https://download.docker.com/linux/debian",
+	)
+	if !ok {
+		t.Fatal("expected Docker profile")
+	}
+
+	exec := &fakeExecutor{
+		runSudoOutputs: []string{
+			"",
+		},
+		runSudoLabelOutputs: []string{
+			"REPAIR_ERROR|fingerprint_mismatch|profile=docker-ce",
+		},
+		runSudoLabelErrors: []error{
+			errors.New("exit status 22"),
+		},
+	}
+
+	got := applyKnownAPTProfileRepair(
+		exec,
+		TargetFacts{
+			Platform:       PlatformLinux,
+			Distribution:   "parrot",
+			Version:        "6.4",
+			Codename:       "lory",
+			Architecture:   "amd64",
+			PackageManager: ManagerAPT,
+		},
+		profile,
+	)
+
+	if !got.Attempted {
+		t.Fatal("expected Docker repair attempt")
+	}
+	if got.Applied {
+		t.Fatal("Docker fingerprint mismatch must not apply a repair")
+	}
+	if !got.RolledBack {
+		t.Fatal("Docker fingerprint mismatch must restore the targeted snapshot")
+	}
+	if got.ProfileID != "docker-ce" {
+		t.Fatalf("profile ID = %q, want docker-ce", got.ProfileID)
+	}
+
+	if len(exec.commands) < 2 {
+		t.Fatalf("expected snapshot and repair commands, got %d", len(exec.commands))
+	}
+
+	repairCommand := exec.commands[1]
+	for _, fingerprint := range profile.ExpectedFingerprints {
+		if !strings.Contains(repairCommand, fingerprint) {
+			t.Fatalf(
+				"repair command does not include pinned Docker fingerprint %s",
+				fingerprint,
+			)
+		}
 	}
 }
