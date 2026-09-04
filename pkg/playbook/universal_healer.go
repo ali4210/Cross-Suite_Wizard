@@ -2254,55 +2254,92 @@ func RunSelfHealingTroubleshooter(client *ssh.Client, targetOS osdetect.TargetOS
 	if len(result.Actions) == 0 {
 		fmt.Println(
 			Yellow +
-				"[!] No eligible known-vendor repair actions were found. No system changes were made." +
+				"[!] No known-vendor APT repair actions were found. No system changes were made." +
 				Reset,
 		)
 		return
 	}
 
-	fmt.Println(Red + Bold + "\n[!] APPLY MODE: This will modify only a verified known-vendor repository configuration." + Reset)
-	fmt.Println(Yellow + "    A pre-repair snapshot will be created before any modification." + Reset)
+	fmt.Println(Cyan + Bold + "
+Available repository repair actions:" + Reset)
+	for index, action := range result.Actions {
+		status := "eligible — approval required"
+		if !action.Eligible {
+			status = "blocked"
+		}
+
+		fmt.Printf(
+			"  [%d] %s — %s (%s)
+",
+			index+1,
+			action.ID,
+			action.ProfileDisplayName,
+			status,
+		)
+	}
+
+	selection := strings.TrimSpace(
+		transfer.ReadRealtimeInput(
+			"Select one repair action [1-" + fmt.Sprintf("%d", len(result.Actions)) + "] or 0 to cancel: ",
+		),
+	)
+
+	if selection == "" ||
+		selection == "0" ||
+		strings.EqualFold(selection, "q") ||
+		strings.EqualFold(selection, "back") {
+		fmt.Println(Yellow + "[!] Repair selection canceled. No system changes were made." + Reset)
+		return
+	}
+
+	selectedIndex := 0
+	if _, err := fmt.Sscanf(selection, "%d", &selectedIndex); err != nil ||
+		selectedIndex < 1 ||
+		selectedIndex > len(result.Actions) {
+		fmt.Println(Yellow + "[!] Invalid repair action selection. No system changes were made." + Reset)
+		return
+	}
+
+	selectedAction := result.Actions[selectedIndex-1]
+	fmt.Println("
+" + repohealer.FormatRepairAction(selectedAction))
+
+	if !selectedAction.Eligible {
+		fmt.Println(
+			Yellow +
+				"[BLOCKED] This repair action is not approved for the detected target. No system changes were made." +
+				Reset,
+		)
+		return
+	}
+
+	fmt.Println(Red + Bold + "
+[!] APPLY MODE: The selected action may modify only the displayed repository source/keyring files." + Reset)
+	fmt.Println(Yellow + "    A targeted pre-repair snapshot will be created before any modification." + Reset)
 
 	confirmation := strings.TrimSpace(
-		transfer.ReadRealtimeInput("Apply the displayed known-vendor repair plan now? [y/N]: "),
+		transfer.ReadRealtimeInput(
+			"Type yes to apply this exact repair, or anything else to cancel: ",
+		),
 	)
 
-	if !strings.EqualFold(confirmation, "y") && !strings.EqualFold(confirmation, "yes") {
-		fmt.Println(Yellow + "[!] Repair canceled by user. No system changes were made." + Reset)
-		return
-	}
-
-	repairResult := repohealer.ApplyKnownAPTRepairs(
+	execution := repohealer.ApproveAndApplyAPTRepair(
 		repoHealerExecutor{client: client},
 		result,
+		selectedAction.ID,
+		confirmation,
 	)
 
-	if repairResult.Applied {
-		fmt.Println(Green + Bold + "\n[SUCCESS] Verified known-vendor repository repair completed." + Reset)
-		fmt.Println(Green + "Snapshot: " + repairResult.Snapshot.Path + Reset)
-		fmt.Println(Green + "Repair output: " + repairResult.Output + Reset)
-		fmt.Println(Green + "APT verification completed successfully." + Reset)
-		return
-	}
+	fmt.Println("
+" + repohealer.FormatApprovalExecutionResult(execution))
 
-	if repairResult.RolledBack {
-		fmt.Println(Red + Bold + "\n[ROLLBACK COMPLETED] Post-repair verification failed; the APT source/keyring snapshot was restored." + Reset)
-		fmt.Println(Red + "Snapshot: " + repairResult.Snapshot.Path + Reset)
-	} else {
-		fmt.Println(Red + Bold + "\n[BLOCKED] Known-vendor repair was not applied." + Reset)
-	}
-
-	if repairResult.Error != nil {
-		fmt.Println(Red + "Reason: " + repairResult.Error.Error() + Reset)
-	}
-
-	if strings.TrimSpace(repairResult.Output) != "" {
-		fmt.Println(Yellow + "\nRepair output:\n" + repairResult.Output + Reset)
-	}
-
-	if strings.TrimSpace(repairResult.VerificationOut) != "" {
-		fmt.Println(Yellow + "\nAPT verification output:\n" + repairResult.VerificationOut + Reset)
-	}
+	audit := repohealer.BuildRepairAuditEvent(execution, time.Now())
+	fmt.Printf(
+		Cyan+"Audit event: decision=%s failure_category=%s
+"+Reset,
+		audit.Decision,
+		audit.FailureCategory,
+	)
 }
 
 // InspectFootprintState reads state.json and displays it inside a scrollable pager view
