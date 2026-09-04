@@ -14,31 +14,54 @@ type APTSourceReference struct {
 	KeyringPath   string
 }
 
-var aptListSourceReferencePattern = regexp.MustCompile(
-	`^(.+):([0-9]+):(deb(?:-src)?[[:space:]]+\[[^]]*signed-by[[:space:]]*=[[:space:]]*([^][[:space:]]+)[^]]*\][[:space:]]+.+)$`,
+var aptSignedByPattern = regexp.MustCompile(
+	`(?i)\bsigned-by\s*=\s*([^\s\]]+)`,
 )
 
 func ParseAPTListSourceReference(line string) (APTSourceReference, bool) {
-	match := aptListSourceReferencePattern.FindStringSubmatch(strings.TrimSpace(line))
-	if len(match) != 4 {
+	trimmed := strings.TrimSpace(line)
+
+	firstSeparator := strings.Index(trimmed, ":")
+	if firstSeparator < 1 {
 		return APTSourceReference{}, false
 	}
 
-	lineNumber, err := strconv.Atoi(match[2])
+	sourceFile := strings.TrimSpace(trimmed[:firstSeparator])
+	remainder := trimmed[firstSeparator+1:]
+
+	secondSeparator := strings.Index(remainder, ":")
+	if secondSeparator < 1 {
+		return APTSourceReference{}, false
+	}
+
+	lineNumberText := strings.TrimSpace(remainder[:secondSeparator])
+	sourceLine := strings.TrimSpace(remainder[secondSeparator+1:])
+
+	lineNumber, err := strconv.Atoi(lineNumberText)
 	if err != nil || lineNumber < 1 {
 		return APTSourceReference{}, false
 	}
 
-	sourceLine := strings.TrimSpace(match[3])
-	keyringPath := strings.TrimSpace(match[4])
+	if !strings.HasPrefix(sourceLine, "deb ") &&
+		!strings.HasPrefix(sourceLine, "deb-src ") {
+		return APTSourceReference{}, false
+	}
+
+	signedByMatch := aptSignedByPattern.FindStringSubmatch(sourceLine)
+	if len(signedByMatch) != 2 {
+		return APTSourceReference{}, false
+	}
+
+	keyringPath := strings.TrimSpace(signedByMatch[1])
 	repositoryURL := extractRepositoryURL(sourceLine)
 
-	if match[1] == "" || sourceLine == "" || keyringPath == "" || repositoryURL == "" {
+	if sourceFile == "" || sourceLine == "" ||
+		keyringPath == "" || repositoryURL == "" {
 		return APTSourceReference{}, false
 	}
 
 	return APTSourceReference{
-		SourceFile:    strings.TrimSpace(match[1]),
+		SourceFile:    sourceFile,
 		LineNumber:    lineNumber,
 		SourceLine:    sourceLine,
 		RepositoryURL: repositoryURL,
