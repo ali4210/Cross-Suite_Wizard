@@ -155,19 +155,8 @@ exit ${PIPESTATUS[0]}
 			finding.RepositoryName = "Microsoft Visual Studio Code"
 			finding.Risk = RiskKnownVendor
 			finding.AutoRepairable = true
-			finding.RequiresConsent = false
-			finding.RecommendedFix = "A verified Microsoft VS Code profile can restore the Microsoft keyring and bind this repository to a dedicated keyring. Repair remains disabled until Phase 2 policy and fingerprint verification are implemented."
-
-			actions = append(actions, RepairAction{
-				ID:              "repair-apt-microsoft-vscode-keyring",
-				FindingCode:     finding.Code,
-				Risk:            RiskKnownVendor,
-				Description:     "Restore the missing Microsoft VS Code APT keyring through a pinned vendor profile and rewrite only the VS Code source signed-by path.",
-				Commands:        []string{"PENDING_PROFILE_CONTROLLED_REPAIR"},
-				Verification:    []string{"apt-get update"},
-				Rollback:        []string{"Restore the pre-repair APT source and keyring snapshot."},
-				RequiresConsent: false,
-			})
+			finding.RequiresConsent = true
+			finding.RecommendedFix = "A verified Microsoft VS Code profile can restore the Microsoft keyring and bind this repository to a dedicated keyring. The repair plan is shown separately and requires explicit approval before any system change."
 		}
 
 		findings = append(findings, finding)

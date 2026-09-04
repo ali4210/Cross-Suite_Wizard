@@ -58,6 +58,7 @@ func (e *Engine) Run() Result {
 		result.Evidence = append(result.Evidence, CollectSystemdJournal(e.exec)...)
 	}
 
+	result.Actions = append(result.Actions, BuildRepairPlan(result)...)
 	result.VerificationOK = !hasBlockingFindings(result.Findings)
 	result.ChangesApplied = false
 	result.CompletedAt = time.Now().UTC()

@@ -19,6 +19,7 @@ func RenderTerminal(result Result) string {
 	fmt.Fprintf(&b, "Package manager: %s\n", result.Target.PackageManager)
 	fmt.Fprintf(&b, "Evidence records: %d\n", len(result.Evidence))
 	fmt.Fprintf(&b, "Findings: %d\n", len(result.Findings))
+	fmt.Fprintf(&b, "Planned repair actions: %d\n", len(result.Actions))
 	fmt.Fprintf(&b, "Changes applied: %t\n", result.ChangesApplied)
 	fmt.Fprintf(&b, "================================================================================\n\n")
 
@@ -46,6 +47,25 @@ func RenderTerminal(result Result) string {
 			fmt.Fprintf(&b, "Risk: %s\n", finding.Risk)
 			fmt.Fprintf(&b, "Automatic repair eligible: %t\n", finding.AutoRepairable)
 			fmt.Fprintf(&b, "Administrator approval required: %t\n\n", finding.RequiresConsent)
+		}
+	}
+
+	if len(result.Actions) > 0 {
+		b.WriteString("================================================================================\n")
+		b.WriteString("=== PLANNED KNOWN-VENDOR REPAIRS — NOT EXECUTED                               ===\n")
+		b.WriteString("================================================================================\n\n")
+
+		for index, action := range result.Actions {
+			fmt.Fprintf(&b, "[PLAN %d] %s\n", index+1, action.Description)
+			fmt.Fprintf(&b, "Risk: %s\n", action.Risk)
+			fmt.Fprintf(&b, "Administrator approval required: %t\n", action.RequiresConsent)
+
+			for _, command := range action.Commands {
+				fmt.Fprintf(&b, "- %s\n", command)
+			}
+
+			fmt.Fprintf(&b, "Verification: %s\n", strings.Join(action.Verification, " | "))
+			fmt.Fprintf(&b, "Rollback: %s\n\n", strings.Join(action.Rollback, " | "))
 		}
 	}
 
