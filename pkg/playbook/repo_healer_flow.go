@@ -54,15 +54,11 @@ func runSelectedRepositoryRepairFlow(
 		return
 	}
 
-	selectedIndex := 0
-	if _, err := fmt.Sscanf(selection, "%d", &selectedIndex); err != nil ||
-		selectedIndex < 1 ||
-		selectedIndex > len(result.Actions) {
+	selectedAction, selected := selectRepositoryRepairAction(result.Actions, selection)
+	if !selected {
 		fmt.Println(Yellow + "[!] Invalid repair action selection. No system changes were made." + Reset)
 		return
 	}
-
-	selectedAction := result.Actions[selectedIndex-1]
 	fmt.Println("\n" + repohealer.FormatRepairAction(selectedAction))
 
 	if !selectedAction.Eligible {
