@@ -158,3 +158,28 @@ func TestBuildRepairPlanRejectsUnknownRepository(t *testing.T) {
 		t.Fatalf("unknown repository must not receive a repair action, got %d", len(actions))
 	}
 }
+
+func TestBuildRepairPlanForDockerKeyringBindingMismatch(t *testing.T) {
+	result := dockerPlanResult()
+	result.Findings[0].Code = "APT_SOURCE_KEYRING_MISMATCH"
+
+	actions := BuildRepairPlan(result)
+
+	if len(actions) != 1 {
+		t.Fatalf("expected one Docker binding-mismatch action, got %d", len(actions))
+	}
+
+	action := actions[0]
+	if action.ID != "apt-source-binding-repair-docker-ce" {
+		t.Fatalf("action ID = %q", action.ID)
+	}
+	if action.FindingCode != "APT_SOURCE_KEYRING_MISMATCH" {
+		t.Fatalf("finding code = %q", action.FindingCode)
+	}
+	if !action.Eligible {
+		t.Fatalf("Docker binding mismatch must be eligible, block reason: %s", action.BlockReason)
+	}
+	if !action.RequiresConsent {
+		t.Fatal("Docker binding mismatch must require explicit consent")
+	}
+}

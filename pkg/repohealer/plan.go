@@ -10,7 +10,9 @@ func BuildRepairPlan(result Result) []RepairAction {
 	seenProfiles := make(map[string]bool)
 
 	for _, finding := range result.Findings {
-		if finding.Code != "APT_KEYRING_PATH_MISSING" {
+		if !IsKnownAPTRepairFinding(finding.Code) {
+    continue
+} {
 			continue
 		}
 

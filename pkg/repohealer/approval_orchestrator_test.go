@@ -158,3 +158,49 @@ func TestApproveAndApplyAPTRepairReturnsExecutionFailure(t *testing.T) {
 		t.Fatalf("expected snapshot, repair, rollback commands; got %d", len(exec.commands))
 	}
 }
+
+func TestApproveAndApplyAPTRepairExecutesApprovedDockerBindingMismatch(t *testing.T) {
+	exec := &fakeExecutor{
+		runSudoOutputs: []string{
+			"",
+			"",
+		},
+		runSudoLabelOutputs: []string{
+			"REPAIR_APPLIED|docker-ce|fingerprint=9DC858229FC7DD38854AE2D88D81803C0EBFCD88",
+		},
+	}
+
+	result := dockerRepairResult()
+	result.Findings[0].Code = "APT_SOURCE_KEYRING_MISMATCH"
+
+	got := ApproveAndApplyAPTRepair(
+		exec,
+		result,
+		"apt-source-binding-repair-docker-ce",
+		"yes",
+	)
+
+	if got.Decision != ApprovalExecutionExecuted {
+		t.Fatalf(
+			"decision = %q, want %q; error = %v",
+			got.Decision,
+			ApprovalExecutionExecuted,
+			got.Error,
+		)
+	}
+	if got.Action.FindingCode != "APT_SOURCE_KEYRING_MISMATCH" {
+		t.Fatalf("finding code = %q", got.Action.FindingCode)
+	}
+	if !got.RepairResult.Attempted {
+		t.Fatal("approved Docker binding mismatch must attempt repair")
+	}
+	if !got.RepairResult.Applied {
+		t.Fatalf("approved Docker binding mismatch must apply: %v", got.Error)
+	}
+	if got.RepairResult.RolledBack {
+		t.Fatal("successful Docker binding mismatch repair must not roll back")
+	}
+	if len(exec.commands) != 3 {
+		t.Fatalf("expected snapshot, repair, verification commands; got %d", len(exec.commands))
+	}
+}

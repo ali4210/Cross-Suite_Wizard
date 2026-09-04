@@ -55,6 +55,18 @@ func ApproveAndApplyAPTRepair(
 		}
 	}
 
+	if !IsKnownAPTRepairFinding(selected.FindingCode) {
+		return ApprovalExecutionResult{
+			Decision: ApprovalExecutionActionNotFound,
+			Action:   selected,
+			Error: fmt.Errorf(
+				"repair action %q has unsupported APT finding code %q",
+				selected.ID,
+				selected.FindingCode,
+			),
+		}
+	}
+
 	if !IsRepairApproved(selected, response) {
 		return ApprovalExecutionResult{
 			Decision: ApprovalExecutionDeclined,
