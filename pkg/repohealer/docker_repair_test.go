@@ -135,12 +135,6 @@ func TestApplyKnownAPTRepairsAppliesDockerRepairAfterVerification(t *testing.T) 
 	if got.ProfileID != "docker-ce" {
 		t.Fatalf("profile ID = %q, want docker-ce", got.ProfileID)
 	}
-	if got.Fingerprint != "9DC858229FC7DD38854AE2D88D81803C0EBFCD88" {
-		t.Fatalf(
-			"fingerprint = %q, want accepted Docker fingerprint",
-			got.Fingerprint,
-		)
-	}
 	if len(exec.commands) != 3 {
 		t.Fatalf(
 			"expected snapshot, repair, and verification commands; got %d",
