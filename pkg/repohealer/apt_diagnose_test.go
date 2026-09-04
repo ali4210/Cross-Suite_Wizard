@@ -175,6 +175,28 @@ func TestAPTAdapterDiagnoseKeepsMissingDockerKeyringAsMissingFinding(t *testing.
 	if !foundMissing {
 		t.Fatalf("expected missing Docker keyring finding; findings: %#v", findings)
 	}
+
+	var missing Finding
+	for _, finding := range findings {
+		if finding.Code == "APT_KEYRING_PATH_MISSING" {
+			missing = finding
+			break
+		}
+	}
+
+	if missing.RepositoryName != "Docker CE" {
+		t.Fatalf("repository name = %q, want Docker CE", missing.RepositoryName)
+	}
+	if missing.Risk != RiskKnownVendor {
+		t.Fatalf("risk = %q, want %q", missing.Risk, RiskKnownVendor)
+	}
+	if !missing.AutoRepairable {
+		t.Fatal("known Docker missing keyring must be auto-repairable after approval")
+	}
+	if !missing.RequiresConsent {
+		t.Fatal("known Docker missing keyring must require explicit approval")
+	}
+
 	if len(exec.commands) != 4 {
 		t.Fatalf(
 			"expected inventory, apt update, keyring check, source-line read; got %d commands",

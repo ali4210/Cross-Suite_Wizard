@@ -190,12 +190,16 @@ exit ${PIPESTATUS[0]}
 			RequiresConsent: true,
 		}
 
-		if isMicrosoftVSCodeRepo(repositoryURL) {
-			finding.RepositoryName = "Microsoft Visual Studio Code"
+		if profile, knownVendor := FindVendorProfile(ManagerAPT, repositoryURL); knownVendor {
+			finding.RepositoryName = profile.DisplayName
 			finding.Risk = RiskKnownVendor
 			finding.AutoRepairable = true
 			finding.RequiresConsent = true
-			finding.RecommendedFix = "A verified Microsoft VS Code profile can restore the Microsoft keyring and bind this repository to a dedicated keyring. The repair plan is shown separately and requires explicit approval before any system change."
+			finding.RecommendedFix = fmt.Sprintf(
+				"A verified %s profile can restore the dedicated keyring and rewrite only %s. The repair plan is shown separately and requires explicit approval before any system change.",
+				profile.DisplayName,
+				profile.SourceFile,
+			)
 		}
 
 		findings = append(findings, finding)
