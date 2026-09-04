@@ -43,7 +43,10 @@ for target in "${TARGETS[@]}"; do
 	fi
 done
 
-find "$SNAPSHOT_DIR" -type f -print0 \
+find "$SNAPSHOT_DIR" \
+        -type f \
+        ! -path "$SNAPSHOT_DIR/checksums.sha256" \
+        -print0 \
 	| sort -z \
 	| xargs -0 sha256sum \
 	> "$SNAPSHOT_DIR/checksums.sha256"

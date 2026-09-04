@@ -36,6 +36,13 @@ func TestCreateAPTFileSnapshotRecordsPresentAndAbsentStates(t *testing.T) {
 
 	command := exec.commands[0]
 
+	if !strings.Contains(command, `! -path "$SNAPSHOT_DIR/checksums.sha256"`) {
+		t.Fatalf(
+			"snapshot checksum command must exclude its own manifest:\n%s",
+			command,
+		)
+	}
+
 	for _, expected := range []string{
 		"SUDO:",
 		`TARGETS=("/etc/apt/sources.list.d/docker.list" "/etc/apt/keyrings/docker.gpg")`,
