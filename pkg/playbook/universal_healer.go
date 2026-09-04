@@ -2199,18 +2199,18 @@ func (e repoHealerExecutor) RunSudoWithLabel(script, label string) (string, erro
 
 // RunSelfHealingTroubleshooter runs the universal repository healer backend.
 func RunSelfHealingTroubleshooter(client *ssh.Client, targetOS osdetect.TargetOS) {
-	fmt.Println(Cyan + Bold + "\n[+] Launching Universal Repository Healer..." + Reset)
+	fmt.Println(Cyan + Bold + "
+[+] Launching Universal Repository Healer..." + Reset)
 
 	fmt.Println(Blue + "--------------------------------------------------------------------------------" + Reset)
 	fmt.Println("  [1] Diagnose repository health only (no system changes)")
-	fmt.Println("  [2] Diagnose and apply recognized known-vendor repairs")
+	fmt.Println("  [2] Diagnose and review recognized known-vendor repair plans")
 	fmt.Println(Red + "  [0] Return to Hub 5 Menu" + Reset)
 	fmt.Println(Blue + "--------------------------------------------------------------------------------" + Reset)
 
 	modeChoice := strings.TrimSpace(
 		transfer.ReadRealtimeInput("Select mode [0-2, default: 1]: "),
 	)
-
 	if modeChoice == "" {
 		modeChoice = "1"
 	}
@@ -2227,11 +2227,8 @@ func RunSelfHealingTroubleshooter(client *ssh.Client, targetOS osdetect.TargetOS
 		policy = repohealer.DefaultKnownVendorRepairPolicy()
 	}
 
-	engine := repohealer.New(
-		repoHealerExecutor{client: client},
-		targetOS,
-		policy,
-	)
+	executor := repoHealerExecutor{client: client}
+	engine := repohealer.New(executor, targetOS, policy)
 
 	result := engine.Run()
 	report := repohealer.RenderTerminal(result)
@@ -2280,7 +2277,7 @@ Available repository repair actions:" + Reset)
 
 	selection := strings.TrimSpace(
 		transfer.ReadRealtimeInput(
-			"Select one repair action [1-" + fmt.Sprintf("%d", len(result.Actions)) + "] or 0 to cancel: ",
+			"Select one repair action [1-"+fmt.Sprintf("%d", len(result.Actions))+"] or 0 to cancel: ",
 		),
 	)
 
@@ -2313,9 +2310,17 @@ Available repository repair actions:" + Reset)
 		return
 	}
 
-	fmt.Println(Red + Bold + "
-[!] APPLY MODE: The selected action may modify only the displayed repository source/keyring files." + Reset)
-	fmt.Println(Yellow + "    A targeted pre-repair snapshot will be created before any modification." + Reset)
+	fmt.Println(
+		Red + Bold +
+			"
+[!] APPLY MODE: The selected action may modify only the displayed repository source/keyring files." +
+			Reset,
+	)
+	fmt.Println(
+		Yellow +
+			"    A targeted pre-repair snapshot will be created before any modification." +
+			Reset,
+	)
 
 	confirmation := strings.TrimSpace(
 		transfer.ReadRealtimeInput(
@@ -2324,7 +2329,7 @@ Available repository repair actions:" + Reset)
 	)
 
 	execution := repohealer.ApproveAndApplyAPTRepair(
-		repoHealerExecutor{client: client},
+		executor,
 		result,
 		selectedAction.ID,
 		confirmation,
