@@ -2,6 +2,7 @@ package repohealer
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -80,6 +81,7 @@ func TestApplyDeb822RepairExecutionWithOptionsUsesConfiguredPathsAndVerification
 	t *testing.T,
 ) {
 	request := validDockerDeb822ExecutionRequest(t)
+	targetRoot := t.TempDir()
 	fixedTime := time.Date(2026, time.September, 12, 1, 2, 3, 456, time.UTC)
 
 	exec := &fakeExecutor{
@@ -101,6 +103,7 @@ func TestApplyDeb822RepairExecutionWithOptionsUsesConfiguredPathsAndVerification
 		exec,
 		request,
 		deb822RepairExecutionOptions{
+			targetRoot:         targetRoot,
 			snapshotRoot:       "/tmp/cross-suite-test-snapshots",
 			temporaryRoot:      "/tmp/cross-suite-test-work",
 			verificationScript: "printf 'forced verification failure\\n'; exit 99",
@@ -130,5 +133,83 @@ func TestApplyDeb822RepairExecutionWithOptionsUsesConfiguredPathsAndVerification
 	}
 	if !strings.Contains(exec.commands[3], "forced verification failure") {
 		t.Fatalf("verification command did not use configured script:\n%s", exec.commands[3])
+	}
+
+	resolvedSourceFile := filepath.Join(
+		targetRoot,
+		"etc",
+		"apt",
+		"sources.list.d",
+		"docker.sources",
+	)
+	resolvedKeyringPath := filepath.Join(
+		targetRoot,
+		"etc",
+		"apt",
+		"keyrings",
+		"docker.gpg",
+	)
+
+	if !strings.Contains(exec.commands[1], shellQuote(resolvedSourceFile)) {
+		t.Fatalf(
+			"snapshot command did not use resolved source path:\n%s",
+			exec.commands[1],
+		)
+	}
+	if !strings.Contains(exec.commands[1], shellQuote(resolvedKeyringPath)) {
+		t.Fatalf(
+			"snapshot command did not use resolved keyring path:\n%s",
+			exec.commands[1],
+		)
+	}
+	if !strings.Contains(
+		exec.commands[2],
+		"SOURCE_FILE="+shellQuote(resolvedSourceFile),
+	) {
+		t.Fatalf(
+			"mutation command did not use resolved source path:\n%s",
+			exec.commands[2],
+		)
+	}
+	if !strings.Contains(
+		exec.commands[2],
+		"KEYRING_PATH="+shellQuote(resolvedKeyringPath),
+	) {
+		t.Fatalf(
+			"mutation command did not use resolved keyring path:\n%s",
+			exec.commands[2],
+		)
+	}
+	if strings.Contains(
+		exec.commands[2],
+		"SOURCE_FILE="+shellQuote(request.SourceFile),
+	) {
+		t.Fatalf(
+			"mutation command retained logical source path:\n%s",
+			exec.commands[2],
+		)
+	}
+	if strings.Contains(
+		exec.commands[2],
+		"KEYRING_PATH="+shellQuote(request.KeyringPath),
+	) {
+		t.Fatalf(
+			"mutation command retained logical keyring path:\n%s",
+			exec.commands[2],
+		)
+	}
+	if got.SourceFile != request.SourceFile {
+		t.Fatalf(
+			"result source file = %q, want logical path %q",
+			got.SourceFile,
+			request.SourceFile,
+		)
+	}
+	if got.KeyringPath != request.KeyringPath {
+		t.Fatalf(
+			"result keyring path = %q, want logical path %q",
+			got.KeyringPath,
+			request.KeyringPath,
+		)
 	}
 }

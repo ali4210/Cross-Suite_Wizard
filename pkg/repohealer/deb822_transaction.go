@@ -58,6 +58,35 @@ func applyDeb822RepairExecutionWithOptions(
 		return applyResult
 	}
 
+	resolvedSourceFile, err := resolveDeb822ExecutionTargetPath(
+		options.targetRoot,
+		request.SourceFile,
+	)
+	if err != nil {
+		applyResult.Error = fmt.Errorf(
+			"Deb822 repair blocked: could not resolve approved source path: %w",
+			err,
+		)
+		return applyResult
+	}
+
+	resolvedKeyringPath, err := resolveDeb822ExecutionTargetPath(
+		options.targetRoot,
+		request.KeyringPath,
+	)
+	if err != nil {
+		applyResult.Error = fmt.Errorf(
+			"Deb822 repair blocked: could not resolve approved keyring path: %w",
+			err,
+		)
+		return applyResult
+	}
+
+	resolvedSnapshotTargets := []string{
+		resolvedSourceFile,
+		resolvedKeyringPath,
+	}
+
 	if err := ensureAPTRepairUnlocked(exec); err != nil {
 		applyResult.Error = err
 		return applyResult
@@ -75,7 +104,7 @@ func applyDeb822RepairExecutionWithOptions(
 
 	snapshot, err := createAPTFileSnapshotAtRoot(
 		exec,
-		request.SnapshotTargets,
+		resolvedSnapshotTargets,
 		options.snapshotRoot,
 		snapshotTime,
 		snapshotID,
@@ -184,8 +213,8 @@ echo "DEB822_REPAIR_APPLIED|$PROFILE_ID|fingerprint=$MATCHED_FINGERPRINT"
 `,
 		profile.ID,
 		profile.KeyURL,
-		request.KeyringPath,
-		request.SourceFile,
+		resolvedKeyringPath,
+		resolvedSourceFile,
 		request.RenderedSource,
 		tempDir,
 		shellArray(request.ExpectedFingerprints),
@@ -216,7 +245,7 @@ echo "DEB822_REPAIR_APPLIED|$PROFILE_ID|fingerprint=$MATCHED_FINGERPRINT"
 				"Deb822 keyring/source repair failed: repair command did not report a valid DEB822_REPAIR_APPLIED marker",
 			)
 		}
-		rollbackDeb822Repair(exec, &applyResult, request.SnapshotTargets)
+		rollbackDeb822Repair(exec, &applyResult, resolvedSnapshotTargets)
 		return applyResult
 	}
 
@@ -241,7 +270,7 @@ echo "DEB822_REPAIR_APPLIED|$PROFILE_ID|fingerprint=$MATCHED_FINGERPRINT"
 				"post-repair Deb822 APT verification failed: repository trust or fetch errors were reported",
 			)
 		}
-		rollbackDeb822Repair(exec, &applyResult, request.SnapshotTargets)
+		rollbackDeb822Repair(exec, &applyResult, resolvedSnapshotTargets)
 		return applyResult
 	}
 

@@ -3,6 +3,7 @@ package repohealer
 import "time"
 
 type deb822RepairExecutionOptions struct {
+	targetRoot         string
 	snapshotRoot       string
 	temporaryRoot      string
 	verificationScript string
@@ -11,6 +12,7 @@ type deb822RepairExecutionOptions struct {
 
 func defaultDeb822RepairExecutionOptions() deb822RepairExecutionOptions {
 	return deb822RepairExecutionOptions{
+		targetRoot:         "",
 		snapshotRoot:       defaultAPTSnapshotRoot,
 		temporaryRoot:      "/var/tmp",
 		verificationScript: defaultAPTVerificationScript,
