@@ -39,10 +39,52 @@ func BuildRepairPlan(result Result) []RepairAction {
 			ExpectedFingerprints: append([]string(nil), profile.ExpectedFingerprints...),
 			KeyringPath:          profile.KeyringPath,
 			SourceFile:           profile.SourceFile,
+			SourceFormat:         finding.SourceFormat,
 			SnapshotTargets: []string{
 				profile.SourceFile,
 				profile.KeyringPath,
 			},
+		}
+
+		if finding.SourceFormat == SourceFormatDeb822 {
+			action.Risk = RiskBlocked
+			action.Description = fmt.Sprintf(
+				"APT repair for %s is blocked because the detected source uses Deb822 format.",
+				profile.DisplayName,
+			)
+			action.Commands = nil
+			action.Verification = nil
+			action.Rollback = nil
+			action.RequiresConsent = false
+			action.Eligible = false
+			action.BlockReason = fmt.Sprintf(
+				"Deb822 source repair is not implemented yet. The detected source file %s will not be converted to the profile .list file %s.",
+				finding.SourceFile,
+				profile.SourceFile,
+			)
+			actions = append(actions, action)
+			continue
+		}
+
+		if finding.SourceFormat != SourceFormatUnknown &&
+			finding.SourceFormat != SourceFormatAPTList {
+			action.Risk = RiskBlocked
+			action.Description = fmt.Sprintf(
+				"APT repair for %s is blocked because the source format is unsupported.",
+				profile.DisplayName,
+			)
+			action.Commands = nil
+			action.Verification = nil
+			action.Rollback = nil
+			action.RequiresConsent = false
+			action.Eligible = false
+			action.BlockReason = fmt.Sprintf(
+				"Unsupported APT source format %q for %s.",
+				finding.SourceFormat,
+				finding.SourceFile,
+			)
+			actions = append(actions, action)
+			continue
 		}
 
 		renderedSource, err := RenderAPTSource(profile, SourceRenderInput{

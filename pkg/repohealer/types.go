@@ -50,6 +50,14 @@ const (
 	ManagerUnknown    PackageManager = "unknown"
 )
 
+type SourceFormat string
+
+const (
+	SourceFormatUnknown SourceFormat = ""
+	SourceFormatAPTList SourceFormat = "apt-list"
+	SourceFormatDeb822  SourceFormat = "apt-deb822"
+)
+
 type TargetFacts struct {
 	Platform       Platform       `json:"platform"`
 	Distribution   string         `json:"distribution,omitempty"`
@@ -68,40 +76,42 @@ type CommandEvidence struct {
 }
 
 type Finding struct {
-	Code            string    `json:"code"`
-	Severity        Severity  `json:"severity"`
-	Risk            RiskLevel `json:"risk"`
-	RepositoryName  string    `json:"repository_name,omitempty"`
-	RepositoryURL   string    `json:"repository_url,omitempty"`
-	SourceFile      string    `json:"source_file,omitempty"`
-	SourceLine      int       `json:"source_line,omitempty"`
-	Evidence        string    `json:"evidence"`
-	RecommendedFix  string    `json:"recommended_fix"`
-	AutoRepairable  bool      `json:"auto_repairable"`
-	RequiresConsent bool      `json:"requires_consent"`
+	Code            string       `json:"code"`
+	Severity        Severity     `json:"severity"`
+	Risk            RiskLevel    `json:"risk"`
+	RepositoryName  string       `json:"repository_name,omitempty"`
+	RepositoryURL   string       `json:"repository_url,omitempty"`
+	SourceFile      string       `json:"source_file,omitempty"`
+	SourceLine      int          `json:"source_line,omitempty"`
+	SourceFormat    SourceFormat `json:"source_format,omitempty"`
+	Evidence        string       `json:"evidence"`
+	RecommendedFix  string       `json:"recommended_fix"`
+	AutoRepairable  bool         `json:"auto_repairable"`
+	RequiresConsent bool         `json:"requires_consent"`
 }
 
 type RepairAction struct {
-	ID                   string      `json:"id"`
-	FindingCode          string      `json:"finding_code"`
-	Risk                 RiskLevel   `json:"risk"`
-	Description          string      `json:"description"`
-	Commands             []string    `json:"commands"`
-	Verification         []string    `json:"verification"`
-	Rollback             []string    `json:"rollback"`
-	RequiresConsent      bool        `json:"requires_consent"`
-	Eligible             bool        `json:"eligible"`
-	BlockReason          string      `json:"block_reason,omitempty"`
-	ProfileID            string      `json:"profile_id,omitempty"`
-	ProfileDisplayName   string      `json:"profile_display_name,omitempty"`
-	RepositoryURL        string      `json:"repository_url,omitempty"`
-	Target               TargetFacts `json:"target"`
-	KeyURL               string      `json:"key_url,omitempty"`
-	ExpectedFingerprints []string    `json:"expected_fingerprints,omitempty"`
-	KeyringPath          string      `json:"keyring_path,omitempty"`
-	SourceFile           string      `json:"source_file,omitempty"`
-	RenderedSource       string      `json:"rendered_source,omitempty"`
-	SnapshotTargets      []string    `json:"snapshot_targets,omitempty"`
+	ID                   string       `json:"id"`
+	FindingCode          string       `json:"finding_code"`
+	Risk                 RiskLevel    `json:"risk"`
+	Description          string       `json:"description"`
+	Commands             []string     `json:"commands"`
+	Verification         []string     `json:"verification"`
+	Rollback             []string     `json:"rollback"`
+	RequiresConsent      bool         `json:"requires_consent"`
+	Eligible             bool         `json:"eligible"`
+	BlockReason          string       `json:"block_reason,omitempty"`
+	ProfileID            string       `json:"profile_id,omitempty"`
+	ProfileDisplayName   string       `json:"profile_display_name,omitempty"`
+	RepositoryURL        string       `json:"repository_url,omitempty"`
+	Target               TargetFacts  `json:"target"`
+	KeyURL               string       `json:"key_url,omitempty"`
+	ExpectedFingerprints []string     `json:"expected_fingerprints,omitempty"`
+	KeyringPath          string       `json:"keyring_path,omitempty"`
+	SourceFile           string       `json:"source_file,omitempty"`
+	SourceFormat         SourceFormat `json:"source_format,omitempty"`
+	RenderedSource       string       `json:"rendered_source,omitempty"`
+	SnapshotTargets      []string     `json:"snapshot_targets,omitempty"`
 }
 
 type Snapshot struct {

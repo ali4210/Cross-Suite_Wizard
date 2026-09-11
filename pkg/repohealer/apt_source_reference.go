@@ -12,6 +12,7 @@ type APTSourceReference struct {
 	SourceLine    string
 	RepositoryURL string
 	KeyringPath   string
+	SourceFormat  SourceFormat
 }
 
 var aptSignedByPattern = regexp.MustCompile(
@@ -78,6 +79,7 @@ func ParseAPTListSourceReference(line string) (APTSourceReference, bool) {
 		SourceLine:    sourceLine,
 		RepositoryURL: repositoryURL,
 		KeyringPath:   keyringPath,
+		SourceFormat:  SourceFormatAPTList,
 	}, true
 }
 
@@ -116,6 +118,7 @@ func ParseAPTDeb822SourceReference(
 		SourceLine:    stanza,
 		RepositoryURL: repositoryURL,
 		KeyringPath:   keyringPath,
+		SourceFormat:  SourceFormatDeb822,
 	}, true
 }
 

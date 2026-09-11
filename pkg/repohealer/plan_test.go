@@ -183,3 +183,75 @@ func TestBuildRepairPlanForDockerKeyringBindingMismatch(t *testing.T) {
 		t.Fatal("Docker binding mismatch must require explicit consent")
 	}
 }
+
+func TestBuildRepairPlanBlocksDeb822DockerSourceRepair(t *testing.T) {
+	result := dockerPlanResult()
+	result.Findings[0].SourceFile = "/etc/apt/sources.list.d/docker.sources"
+	result.Findings[0].SourceLine = 1
+	result.Findings[0].SourceFormat = SourceFormatDeb822
+
+	actions := BuildRepairPlan(result)
+
+	if len(actions) != 1 {
+		t.Fatalf("expected one blocked Deb822 action, got %d", len(actions))
+	}
+
+	action := actions[0]
+	if action.Eligible {
+		t.Fatal("Deb822 Docker repair must be blocked until a dedicated renderer exists")
+	}
+	if action.Risk != RiskBlocked {
+		t.Fatalf("risk = %q, want %q", action.Risk, RiskBlocked)
+	}
+	if action.RequiresConsent {
+		t.Fatal("blocked Deb822 repair must not request consent")
+	}
+	if action.SourceFormat != SourceFormatDeb822 {
+		t.Fatalf("source format = %q, want %q", action.SourceFormat, SourceFormatDeb822)
+	}
+	if action.RenderedSource != "" {
+		t.Fatalf("blocked Deb822 repair must not render a .list source, got %q", action.RenderedSource)
+	}
+	if len(action.Commands) != 0 {
+		t.Fatalf("blocked Deb822 repair must not include mutation commands, got %d", len(action.Commands))
+	}
+	if len(action.Verification) != 0 {
+		t.Fatalf("blocked Deb822 repair must not include verification commands, got %d", len(action.Verification))
+	}
+	if len(action.Rollback) != 0 {
+		t.Fatalf("blocked Deb822 repair must not include rollback instructions, got %d", len(action.Rollback))
+	}
+	if !strings.Contains(action.BlockReason, "Deb822 source repair is not implemented yet") {
+		t.Fatalf("unexpected Deb822 block reason: %s", action.BlockReason)
+	}
+	if !strings.Contains(action.BlockReason, "/etc/apt/sources.list.d/docker.sources") {
+		t.Fatalf("block reason must identify detected source file: %s", action.BlockReason)
+	}
+}
+
+func TestBuildRepairPlanKeepsAPTListDockerSourceRepairEligible(t *testing.T) {
+	result := dockerPlanResult()
+	result.Findings[0].SourceFile = "/etc/apt/sources.list.d/docker.list"
+	result.Findings[0].SourceLine = 1
+	result.Findings[0].SourceFormat = SourceFormatAPTList
+
+	actions := BuildRepairPlan(result)
+
+	if len(actions) != 1 {
+		t.Fatalf("expected one classic APT list action, got %d", len(actions))
+	}
+
+	action := actions[0]
+	if !action.Eligible {
+		t.Fatalf("classic APT list repair must remain eligible: %s", action.BlockReason)
+	}
+	if action.SourceFormat != SourceFormatAPTList {
+		t.Fatalf("source format = %q, want %q", action.SourceFormat, SourceFormatAPTList)
+	}
+	if action.RenderedSource == "" {
+		t.Fatal("classic APT list repair must render a source line")
+	}
+	if len(action.Commands) == 0 {
+		t.Fatal("classic APT list repair must include repair commands")
+	}
+}
