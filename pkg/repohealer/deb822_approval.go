@@ -49,6 +49,11 @@ func ApproveAndApplyDeb822Repair(
 		return result
 	}
 
+	if !Deb822RepairExecutionEnabled() {
+		result.Reason = "Deb822 repair execution is disabled by operator policy; set CROSS_SUITE_DEB822_REPAIR_ENABLED=true only for approved maintenance"
+		return result
+	}
+
 	result.ApplyResult = ApplyDeb822RepairExecution(exec, request)
 
 	if result.ApplyResult.Applied {

@@ -39,6 +39,8 @@ func approvedDockerDeb822Executor() *fakeExecutor {
 }
 
 func TestApproveAndApplyDeb822RepairAppliesExactApprovedRequest(t *testing.T) {
+	t.Setenv(deb822RepairExecutionEnabledEnv, "true")
+
 	inspection, request := readyDockerDeb822ApprovalInputs(t)
 	exec := approvedDockerDeb822Executor()
 
@@ -148,6 +150,8 @@ func TestApproveAndApplyDeb822RepairRejectsNonExplicitApproval(t *testing.T) {
 }
 
 func TestApproveAndApplyDeb822RepairAcceptsCaseInsensitiveExplicitApproval(t *testing.T) {
+	t.Setenv(deb822RepairExecutionEnabledEnv, "true")
+
 	inspection, request := readyDockerDeb822ApprovalInputs(t)
 
 	for _, response := range []string{
@@ -336,6 +340,8 @@ func TestApproveAndApplyDeb822RepairBlocksUnsafeBindingsWithoutCommands(t *testi
 }
 
 func TestApproveAndApplyDeb822RepairReturnsExecutionFailure(t *testing.T) {
+	t.Setenv(deb822RepairExecutionEnabledEnv, "true")
+
 	inspection, request := readyDockerDeb822ApprovalInputs(t)
 	exec := &fakeExecutor{
 		runSudoOutputs: []string{
@@ -380,5 +386,82 @@ func TestApproveAndApplyDeb822RepairReturnsExecutionFailure(t *testing.T) {
 			"command count = %d, want lock, snapshot, mutation, verification, rollback",
 			len(exec.commands),
 		)
+	}
+}
+
+func TestApproveAndApplyDeb822RepairBlocksWhenExecutionPolicyIsDisabled(t *testing.T) {
+	t.Setenv(deb822RepairExecutionEnabledEnv, "")
+
+	inspection, request := readyDockerDeb822ApprovalInputs(t)
+	exec := &fakeExecutor{}
+
+	got := ApproveAndApplyDeb822Repair(
+		exec,
+		inspection,
+		request,
+		"yes",
+	)
+
+	if got.Status != Deb822RepairApprovalStatusBlocked {
+		t.Fatalf(
+			"status = %q, want %q",
+			got.Status,
+			Deb822RepairApprovalStatusBlocked,
+		)
+	}
+	if !strings.Contains(
+		got.Reason,
+		"Deb822 repair execution is disabled by operator policy",
+	) {
+		t.Fatalf("reason = %q, want policy block reason", got.Reason)
+	}
+	if got.ApplyResult.Attempted {
+		t.Fatalf(
+			"disabled execution unexpectedly attempted repair: %#v",
+			got.ApplyResult,
+		)
+	}
+	if len(exec.commands) != 0 {
+		t.Fatalf(
+			"disabled execution ran commands: %#v",
+			exec.commands,
+		)
+	}
+}
+
+func TestApproveAndApplyDeb822RepairDeclinesBeforeExecutionPolicyCheck(t *testing.T) {
+	t.Setenv(deb822RepairExecutionEnabledEnv, "")
+
+	inspection, request := readyDockerDeb822ApprovalInputs(t)
+	exec := &fakeExecutor{}
+
+	got := ApproveAndApplyDeb822Repair(
+		exec,
+		inspection,
+		request,
+		"no",
+	)
+
+	if got.Status != Deb822RepairApprovalStatusDeclined {
+		t.Fatalf(
+			"status = %q, want %q",
+			got.Status,
+			Deb822RepairApprovalStatusDeclined,
+		)
+	}
+	if !strings.Contains(got.Reason, "was not approved") {
+		t.Fatalf("reason = %q, want decline reason", got.Reason)
+	}
+	if strings.Contains(got.Reason, "disabled by operator policy") {
+		t.Fatalf("declined result must not be masked by policy: %q", got.Reason)
+	}
+	if got.ApplyResult.Attempted {
+		t.Fatalf(
+			"declined repair unexpectedly attempted execution: %#v",
+			got.ApplyResult,
+		)
+	}
+	if len(exec.commands) != 0 {
+		t.Fatalf("declined repair ran commands: %#v", exec.commands)
 	}
 }

@@ -61,6 +61,24 @@ Blocked planner action
 
 The planner action remains blocked and non-consent-bearing. It is an inspection entry point, not a direct mutation authorization.
 
+## Execution policy
+
+Deb822 inspection remains available by default, but Deb822 mutation is disabled unless an operator explicitly enables it for an approved maintenance window.
+
+Set the policy only in the process environment that launches Cross-Suite:
+
+```bash
+export CROSS_SUITE_DEB822_REPAIR_ENABLED=true
+```
+
+Any other value, including an unset value, blank value, `false`, `1`, or `yes`, keeps Deb822 execution disabled. When disabled, Repo Healer returns a visible blocked result and runs no privileged repair command, snapshot, or mutation.
+
+Disable the policy after the maintenance window:
+
+```bash
+unset CROSS_SUITE_DEB822_REPAIR_ENABLED
+```
+
 ## Operator procedure
 
 1. Run Repo Healer diagnosis for the target.
