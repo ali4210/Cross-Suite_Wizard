@@ -81,7 +81,45 @@ func writeExecutableTestStub(
 	}
 }
 
+func requireWorkingBubblewrap(t *testing.T) {
+	t.Helper()
+
+	bwrapPath, err := exec.LookPath("bwrap")
+	if err != nil {
+		t.Skip("Bubblewrap is not installed; skipping isolated rollback integration test")
+	}
+
+	cmd := exec.Command(
+		bwrapPath,
+		"--unshare-user",
+		"--unshare-pid",
+		"--unshare-net",
+		"--uid", "0",
+		"--gid", "0",
+		"--ro-bind", "/usr", "/usr",
+		"--ro-bind", "/bin", "/bin",
+		"--ro-bind", "/lib", "/lib",
+		"--ro-bind", "/lib64", "/lib64",
+		"--proc", "/proc",
+		"--dev", "/dev",
+		"--tmpfs", "/tmp",
+		"--",
+		"bash", "-c",
+		`test "$(id -u)" = 0 && test "$(id -g)" = 0`,
+	)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Skipf(
+			"Bubblewrap user namespace sandbox is unavailable; skipping isolated rollback integration test: %v: %s",
+			err,
+			strings.TrimSpace(string(output)),
+		)
+	}
+}
+
 func TestDeb822RepairVerificationFailureRollsBackInBubblewrap(t *testing.T) {
+	requireWorkingBubblewrap(t)
 	targetRoot := t.TempDir()
 	stubDir := t.TempDir()
 
