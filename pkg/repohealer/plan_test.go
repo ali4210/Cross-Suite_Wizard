@@ -227,7 +227,7 @@ func TestBuildRepairPlanBlocksDeb822DockerSourceRepair(t *testing.T) {
 	if len(action.Rollback) != 0 {
 		t.Fatalf("blocked Deb822 repair must not include rollback instructions, got %d", len(action.Rollback))
 	}
-	if !strings.Contains(action.BlockReason, "Deb822 source repair is not implemented yet") {
+	if !strings.Contains(action.BlockReason, "Deb822 source repair requires a separate inspection and fresh explicit approval flow") {
 		t.Fatalf("unexpected Deb822 block reason: %s", action.BlockReason)
 	}
 	if !strings.Contains(action.BlockReason, "/etc/apt/sources.list.d/docker.sources") {

@@ -84,11 +84,26 @@ func runSelectedRepositoryRepairFlow(
 		if inspected {
 			fmt.Println(
 				Cyan +
-					"\n[INSPECTION ONLY] Reading and validating the approved Deb822 source. No repair will run." +
+					"\n[INSPECTION] Reading and validating the approved Deb822 source before any repair decision." +
 					Reset,
 			)
 			fmt.Println(
 				"\n" + repohealer.FormatDeb822RepairInspection(inspection),
+			)
+
+			if !inspection.Ready {
+				fmt.Println(
+					Yellow +
+						"[BLOCKED] Deb822 inspection did not produce a safe execution request. No system changes were made." +
+						Reset,
+				)
+				return
+			}
+
+			runSelectedDeb822RepairExecutionFlow(
+				client,
+				selectedAction,
+				inspection,
 			)
 			return
 		}
@@ -181,4 +196,57 @@ func inspectSelectedDeb822Repair(
 	)
 
 	return inspection, true
+}
+
+func runSelectedDeb822RepairExecutionFlow(
+	client *ssh.Client,
+	action repohealer.RepairAction,
+	inspection repohealer.Deb822RepairInspection,
+) {
+	request, err := prepareSelectedDeb822RepairExecution(
+		action,
+		inspection,
+	)
+	if err != nil {
+		fmt.Println(
+			Yellow +
+				"[BLOCKED] Deb822 execution request could not be prepared. No system changes were made." +
+				Reset,
+		)
+		fmt.Println(Yellow + "Reason: " + err.Error() + Reset)
+		return
+	}
+
+	fmt.Println(
+		Red + Bold +
+			"\n[!] APPLY MODE: The reviewed Deb822 repair may modify only the displayed source and keyring files." +
+			Reset,
+	)
+	fmt.Println(
+		Yellow +
+			"    A targeted two-file snapshot will be created before any modification, followed by apt-get update verification." +
+			Reset,
+	)
+
+	confirmation := strings.TrimSpace(
+		transfer.ReadRealtimeInput(
+			"Type yes to apply this exact reviewed Deb822 repair, or anything else to cancel: ",
+		),
+	)
+
+	execution := repohealer.ApproveAndApplyDeb822Repair(
+		repoHealerExecutor{client: client},
+		inspection,
+		request,
+		confirmation,
+	)
+
+	fmt.Println("\n" + repohealer.FormatDeb822RepairApprovalResult(execution))
+
+	audit := repohealer.BuildDeb822RepairAuditEvent(execution, time.Now())
+	fmt.Printf(
+		Cyan+"Audit event: status=%s failure_category=%s\n"+Reset,
+		audit.Status,
+		audit.FailureCategory,
+	)
 }

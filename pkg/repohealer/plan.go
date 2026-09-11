@@ -59,7 +59,7 @@ func BuildRepairPlan(result Result) []RepairAction {
 			action.RequiresConsent = false
 			action.Eligible = false
 			action.BlockReason = fmt.Sprintf(
-				"Deb822 source repair is not implemented yet. The detected source file %s will not be converted to the profile .list file %s.",
+				"Deb822 source repair requires a separate inspection and fresh explicit approval flow. The detected source file %s will remain in Deb822 format and will not be converted to the profile .list file %s.",
 				finding.SourceFile,
 				profile.SourceFile,
 			)

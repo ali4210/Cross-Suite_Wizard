@@ -107,6 +107,17 @@ func BuildDeb822RepairExecutionRequest(
 		)
 	}
 
+	validation := ValidateSingleProfileDeb822Document(
+		inspection.RenderedSource,
+		profile,
+	)
+	if !validation.Valid {
+		return Deb822RepairExecutionRequest{}, fmt.Errorf(
+			"Deb822 execution request blocked: inspection rendered replacement source is invalid: %s",
+			validation.Reason,
+		)
+	}
+
 	expectedTargets := []string{
 		action.SourceFile,
 		profile.KeyringPath,

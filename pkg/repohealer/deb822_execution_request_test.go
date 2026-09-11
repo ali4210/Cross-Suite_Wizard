@@ -247,6 +247,18 @@ func TestBuildDeb822RepairExecutionRequestRejectsUnsafeBindings(t *testing.T) {
 			wantReason: "has no rendered replacement source",
 		},
 		{
+			name: "Invalid rendered replacement",
+			mutate: func(inspection *Deb822RepairInspection, action *RepairAction, profile *VendorProfile) {
+				inspection.RenderedSource = strings.Replace(
+					inspection.RenderedSource,
+					"Signed-By: "+profile.KeyringPath,
+					"Signed-By: /etc/apt/keyrings/other.gpg",
+					1,
+				)
+			},
+			wantReason: "inspection rendered replacement source is invalid",
+		},
+		{
 			name: "Snapshot scope mismatch",
 			mutate: func(inspection *Deb822RepairInspection, action *RepairAction, profile *VendorProfile) {
 				inspection.SnapshotTargets = []string{
