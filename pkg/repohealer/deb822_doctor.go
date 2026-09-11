@@ -323,6 +323,194 @@ func deriveDeb822DoctorOverall(
 	return overall
 }
 
+func DiagnoseSelectedDeb822RepairRemoteReadiness(
+	exec Executor,
+	facts TargetFacts,
+	action RepairAction,
+) Deb822DoctorReport {
+	report := DiagnoseSelectedDeb822RepairReadiness(facts, action)
+	if !report.CanPreview {
+		return report
+	}
+
+	probe, err := ProbeSelectedDeb822RepairMetadata(exec, action)
+	if err != nil {
+		report.Checks = append(report.Checks, Deb822DoctorCheck{
+			Name:    "remote_metadata_probe",
+			Status:  Deb822DoctorStatusBlocked,
+			Message: "Remote Deb822 metadata probe failed; do not continue to inspection.",
+		})
+		report.Overall = deriveDeb822DoctorOverall(report.Checks)
+		report.CanPreview = false
+		report.CanApply = false
+		return report
+	}
+
+	report.Checks = append(
+		report.Checks,
+		deb822DoctorRemoteProbeChecks(probe)...,
+	)
+	report.Overall = deriveDeb822DoctorOverall(report.Checks)
+	report.CanPreview = report.Overall == Deb822DoctorStatusReady ||
+		report.Overall == Deb822DoctorStatusWarning
+	report.CanApply = report.CanPreview &&
+		Deb822RepairExecutionEnabled()
+
+	return report
+}
+
+func deb822DoctorRemoteProbeChecks(
+	probe Deb822DoctorRemoteProbe,
+) []Deb822DoctorCheck {
+	checks := make([]Deb822DoctorCheck, 0, 4)
+
+	if probe.APTAvailable {
+		checks = append(checks, Deb822DoctorCheck{
+			Name:    "remote_apt_get",
+			Status:  Deb822DoctorStatusReady,
+			Message: "Remote apt-get executable is available.",
+		})
+	} else {
+		checks = append(checks, Deb822DoctorCheck{
+			Name:    "remote_apt_get",
+			Status:  Deb822DoctorStatusBlocked,
+			Message: "Remote apt-get executable is unavailable.",
+		})
+	}
+
+	checks = append(
+		checks,
+		deb822DoctorSourceProbeCheck(probe.Source),
+		deb822DoctorKeyringProbeCheck(probe.Keyring),
+	)
+
+	if probe.PackageLocksActive {
+		checks = append(checks, Deb822DoctorCheck{
+			Name:    "remote_package_locks",
+			Status:  Deb822DoctorStatusWarning,
+			Message: "Remote APT or dpkg lock appears active; preview may continue but wait for the legitimate transaction before applying repair.",
+		})
+	} else {
+		checks = append(checks, Deb822DoctorCheck{
+			Name:    "remote_package_locks",
+			Status:  Deb822DoctorStatusReady,
+			Message: "Remote APT and dpkg lock paths appear clear.",
+		})
+	}
+
+	return checks
+}
+
+func deb822DoctorSourceProbeCheck(
+	file Deb822DoctorRemoteFile,
+) Deb822DoctorCheck {
+	switch file.State {
+	case Deb822DoctorFileStatePresent:
+		return Deb822DoctorCheck{
+			Name:    "remote_source_file",
+			Status:  Deb822DoctorStatusReady,
+			Message: "Remote Deb822 source file is a readable, root-owned, non-writable regular file.",
+		}
+	case Deb822DoctorFileStateMissing:
+		return Deb822DoctorCheck{
+			Name:    "remote_source_file",
+			Status:  Deb822DoctorStatusBlocked,
+			Message: "Remote Deb822 source file is missing; do not continue to inspection.",
+		}
+	case Deb822DoctorFileStateSymlink:
+		return Deb822DoctorCheck{
+			Name:    "remote_source_file",
+			Status:  Deb822DoctorStatusBlocked,
+			Message: "Remote Deb822 source file is a symlink; do not continue to inspection.",
+		}
+	case Deb822DoctorFileStateNotRegular:
+		return Deb822DoctorCheck{
+			Name:    "remote_source_file",
+			Status:  Deb822DoctorStatusBlocked,
+			Message: "Remote Deb822 source path is not a regular file; do not continue to inspection.",
+		}
+	case Deb822DoctorFileStateUnsafeOwner:
+		return Deb822DoctorCheck{
+			Name:    "remote_source_file",
+			Status:  Deb822DoctorStatusBlocked,
+			Message: "Remote Deb822 source file ownership is unsafe; do not continue to inspection.",
+		}
+	case Deb822DoctorFileStateUnsafeMode:
+		return Deb822DoctorCheck{
+			Name:    "remote_source_file",
+			Status:  Deb822DoctorStatusBlocked,
+			Message: "Remote Deb822 source file permissions are unsafe; do not continue to inspection.",
+		}
+	case Deb822DoctorFileStateUnreadable:
+		return Deb822DoctorCheck{
+			Name:    "remote_source_file",
+			Status:  Deb822DoctorStatusBlocked,
+			Message: "Remote Deb822 source file is unreadable; do not continue to inspection.",
+		}
+	default:
+		return Deb822DoctorCheck{
+			Name:    "remote_source_file",
+			Status:  Deb822DoctorStatusBlocked,
+			Message: "Remote Deb822 source file metadata is invalid; do not continue to inspection.",
+		}
+	}
+}
+
+func deb822DoctorKeyringProbeCheck(
+	file Deb822DoctorRemoteFile,
+) Deb822DoctorCheck {
+	switch file.State {
+	case Deb822DoctorFileStatePresent:
+		return Deb822DoctorCheck{
+			Name:    "remote_keyring_file",
+			Status:  Deb822DoctorStatusReady,
+			Message: "Remote keyring file is a readable, root-owned, non-writable regular file.",
+		}
+	case Deb822DoctorFileStateMissing:
+		return Deb822DoctorCheck{
+			Name:    "remote_keyring_file",
+			Status:  Deb822DoctorStatusWarning,
+			Message: "Remote keyring file is missing; the reviewed repair may restore only the verified profile keyring after explicit approval.",
+		}
+	case Deb822DoctorFileStateSymlink:
+		return Deb822DoctorCheck{
+			Name:    "remote_keyring_file",
+			Status:  Deb822DoctorStatusBlocked,
+			Message: "Remote keyring file is a symlink; do not continue to inspection.",
+		}
+	case Deb822DoctorFileStateNotRegular:
+		return Deb822DoctorCheck{
+			Name:    "remote_keyring_file",
+			Status:  Deb822DoctorStatusBlocked,
+			Message: "Remote keyring path is not a regular file; do not continue to inspection.",
+		}
+	case Deb822DoctorFileStateUnsafeOwner:
+		return Deb822DoctorCheck{
+			Name:    "remote_keyring_file",
+			Status:  Deb822DoctorStatusBlocked,
+			Message: "Remote keyring file ownership is unsafe; do not continue to inspection.",
+		}
+	case Deb822DoctorFileStateUnsafeMode:
+		return Deb822DoctorCheck{
+			Name:    "remote_keyring_file",
+			Status:  Deb822DoctorStatusBlocked,
+			Message: "Remote keyring file permissions are unsafe; do not continue to inspection.",
+		}
+	case Deb822DoctorFileStateUnreadable:
+		return Deb822DoctorCheck{
+			Name:    "remote_keyring_file",
+			Status:  Deb822DoctorStatusBlocked,
+			Message: "Remote keyring file is unreadable; do not continue to inspection.",
+		}
+	default:
+		return Deb822DoctorCheck{
+			Name:    "remote_keyring_file",
+			Status:  Deb822DoctorStatusBlocked,
+			Message: "Remote keyring file metadata is invalid; do not continue to inspection.",
+		}
+	}
+}
+
 func FindVendorProfileByID(
 	manager PackageManager,
 	profileID string,

@@ -77,7 +77,8 @@ func runSelectedRepositoryRepairFlow(
 	fmt.Println("\n" + repohealer.FormatRepairAction(selectedAction))
 
 	if !selectedAction.Eligible {
-		doctor := repohealer.DiagnoseSelectedDeb822RepairReadiness(
+		doctor := repohealer.DiagnoseSelectedDeb822RepairRemoteReadiness(
+			repoHealerExecutor{client: client},
 			result.Target,
 			selectedAction,
 		)

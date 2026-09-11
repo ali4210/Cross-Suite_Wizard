@@ -346,3 +346,30 @@ func TestCanProceedToDeb822InspectionUsesDoctorPreviewPermission(t *testing.T) {
 		})
 	}
 }
+
+func TestSelectedRepositoryRepairFlowUsesRemoteDeb822Doctor(t *testing.T) {
+	source, err := os.ReadFile("repo_healer_flow.go")
+	if err != nil {
+		t.Fatalf("os.ReadFile() error = %v", err)
+	}
+
+	text := string(source)
+
+	if !strings.Contains(
+		text,
+		"repohealer.DiagnoseSelectedDeb822RepairRemoteReadiness(",
+	) {
+		t.Fatal(
+			"selected repository repair flow must use remote-aware Deb822 Doctor",
+		)
+	}
+
+	if strings.Contains(
+		text,
+		"doctor := repohealer.DiagnoseSelectedDeb822RepairReadiness(",
+	) {
+		t.Fatal(
+			"selected repository repair flow must not regress to local-only Deb822 Doctor",
+		)
+	}
+}
