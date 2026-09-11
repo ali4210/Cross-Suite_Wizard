@@ -117,7 +117,9 @@ stat -c '%a %U:%G %n' "$CROSS_SUITE_DEB822_AUDIT_PATH"
 
 Before Repo Healer reads a selected Deb822 source or offers a preview, it runs a local Doctor preflight report for the selected action.
 
-Doctor is read-only. It does not connect to the target, invoke `sudo`, create snapshots, write source or keyring files, download keys, or run `apt-get update`.
+Doctor v1 is local-only and read-only. It does not connect to the target, invoke `sudo`, create snapshots, write source or keyring files, download keys, or run `apt-get update`.
+
+A future remote Doctor probe may use the existing non-interactive labeled sudo transport only for a fixed read-only metadata script. Such a probe must not read source or keyring contents, create temporary files, create snapshots, modify files, download keys, or run `apt-get update`.
 
 Doctor reports `READY`, `WARNING`, `BLOCKED`, or `UNSUPPORTED` and checks the selected action's source format, required binding fields, verified vendor profile, repository URL binding, keyring binding, approved Deb822 source-path scope, target-facts match, local execution-policy state, and local audit-path readiness.
 
