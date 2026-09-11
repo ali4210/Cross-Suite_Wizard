@@ -279,8 +279,6 @@ func ShowLocalSSHProvisionerMenu(reader *bufio.Reader) {
 // =============================================================================
 
 func runSudoCommandSilent(args ...string) error {
-	started := time.Now()
-
 	ctx, cancel := context.WithTimeout(context.Background(), sudoCommandTimeout)
 	defer cancel()
 
@@ -292,17 +290,6 @@ func runSudoCommandSilent(args ...string) error {
 	cmd.Stderr = io.Discard
 
 	err := cmd.Run()
-	elapsed := time.Since(started)
-
-	if elapsed > 100*time.Millisecond {
-		fmt.Fprintf(
-			os.Stderr,
-			"\n[LOCALINFO-PROFILE] sudo command took %s: sudo -n %s\n",
-			elapsed,
-			strings.Join(args, " "),
-		)
-	}
-
 	if ctx.Err() == context.DeadlineExceeded {
 		return fmt.Errorf("sudo command timed out after %s", sudoCommandTimeout)
 	}
@@ -317,18 +304,6 @@ func invalidateStatusCache() {
 }
 
 func isLocalSSHActive() bool {
-	started := time.Now()
-	defer func() {
-		elapsed := time.Since(started)
-		if elapsed > 20*time.Millisecond {
-			fmt.Fprintf(
-				os.Stderr,
-				"\n[LOCALINFO-PROFILE] isLocalSSHActive took %s\n",
-				elapsed,
-			)
-		}
-	}()
-
 	statusMux.RLock()
 	if time.Since(cachedStatusTime) < sshStatusCacheTTL && cachedStatusText != "" {
 		active := cachedIsActive

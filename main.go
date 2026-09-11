@@ -40,6 +40,7 @@ import (
 	"cross-ssh/pkg/tunnel"
 	"cross-ssh/pkg/vault"
 	"cross-ssh/pkg/vpn"
+
 	"golang.org/x/crypto/ssh"
 )
 
@@ -116,6 +117,25 @@ func exitAlternateScreenBuffer() {
 
 func clearScreen() {
 	fmt.Print("\033[H\033[2J\033[3J")
+}
+
+func appendProfileLog(message string) {
+	f, err := os.OpenFile(
+		"/tmp/cross-suite-localinfo-profile.log",
+		os.O_CREATE|os.O_APPEND|os.O_WRONLY,
+		0600,
+	)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	_, _ = fmt.Fprintf(
+		f,
+		"%s %s\n",
+		time.Now().Format(time.RFC3339Nano),
+		message,
+	)
 }
 
 func getMasterMeshKeyMain() []byte {
@@ -483,7 +503,6 @@ func printBanner() {
 	displaySessionStatus()
 }
 
-
 func printSubBanner() {
 	banner := fmt.Sprintf(`
 =====================================================================
@@ -654,10 +673,9 @@ func renderMainMenuOptions(currentInput string) {
 }
 
 func renderFullMainMenuCanvas(inputBuffer string) {
-	fmt.Print("\033[H")
+	fmt.Print("\033[H\033[2J")
 	printBanner()
 	renderMainMenuOptions(inputBuffer)
-	fmt.Print("\033[J")
 }
 
 func runInteractiveMenu() {
@@ -776,7 +794,14 @@ func runInteractiveMenu() {
 		case "7":
 			hubAccessControlAssigner(reader)
 		case "8":
+			option8Started := time.Now()
 			hubLocalWorkstationTools(reader)
+			appendProfileLog(
+				fmt.Sprintf(
+					"[OPTION8-PROFILE] Local Workstation hub returned after %s",
+					time.Since(option8Started),
+				),
+			)
 		case "9":
 			hubNetworkDiagnosticsAndTroubleshooting(reader)
 		case "10", "vpn", "VPN":
@@ -1315,7 +1340,7 @@ func checkForGitHubUpdates(reader *bufio.Reader) {
 
 	resp, err := client.Do(req)
 	if err != nil || resp.StatusCode != 200 {
-		fmt.Printf(Red+"[!] Unable to reach GitHub releases API. Re-syncing codebase via Git...\n"+Reset)
+		fmt.Printf(Red + "[!] Unable to reach GitHub releases API. Re-syncing codebase via Git...\n" + Reset)
 		syncViaGitPull(reader)
 		return
 	}
@@ -1354,6 +1379,9 @@ func syncViaGitPull(reader *bufio.Reader) {
 
 	execPath, _ := os.Executable()
 	makeCmd := exec.Command("go", "build", "-ldflags=-s -w", "-o", execPath, "main.go")
+	if sudoUser := os.Getenv("SUDO_USER"); sudoUser != "" && sudoUser != "root" {
+		makeCmd = exec.Command("sudo", "-u", sudoUser, "-E", "go", "build", "-ldflags=-s -w", "-o", execPath, "main.go")
+	}
 	if err := makeCmd.Run(); err != nil {
 		fmt.Printf(Red+"[!] Rebuild failed: %v\n"+Reset, err)
 		pause(reader)
@@ -1442,7 +1470,7 @@ func runPreFlightDiagnostics(reader *bufio.Reader) {
 		if shifted {
 			fmt.Printf(Yellow+"  [!] Port 8080 occupied. Auto-shifted Jenkins mapping to: %d\n"+Reset, resPort)
 		} else {
-			fmt.Printf(Green+"  [=>] Port 8080 is FREE and ready for binding.\n"+Reset)
+			fmt.Printf(Green + "  [=>] Port 8080 is FREE and ready for binding.\n" + Reset)
 		}
 	}
 
@@ -1724,7 +1752,7 @@ func installGlobalCLISubMenu(reader *bufio.Reader) {
 	// Target: /usr/bin/cross-ssh (this is almost always in sudo's secure_path)
 	target := "/usr/bin/cross-ssh"
 
-	fmt.Println(Yellow+"[+] Installing to "+target+" ..."+Reset)
+	fmt.Println(Yellow + "[+] Installing to " + target + " ..." + Reset)
 
 	// Use sudo install to copy and set permissions, and create parent dirs if needed
 	cmdCopy := exec.Command("sudo", "install", "-D", "-m", "755", execPath, target)

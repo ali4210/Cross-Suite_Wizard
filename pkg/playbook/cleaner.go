@@ -2,7 +2,9 @@ package playbook
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"time"
@@ -204,8 +206,39 @@ func executeRemoteCommand(client *ssh.Client, cmd string) (string, error) {
 	}
 	defer session.Close()
 
-	out, err := session.CombinedOutput(cmd)
-	return string(out), err
+	var buf bytes.Buffer
+	session.Stdout = &limitWriter{w: &buf, max: 50 << 20}
+	session.Stderr = session.Stdout
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- session.Run(cmd) }()
+
+	select {
+	case err := <-errCh:
+		return buf.String(), err
+	case <-time.After(5 * time.Minute):
+		session.Signal(ssh.SIGKILL)
+		session.Close()
+		return buf.String(), fmt.Errorf("command timed out after 5m: %s", cmd)
+	}
+}
+
+type limitWriter struct {
+	w   io.Writer
+	max int64
+	n   int64
+}
+
+func (l *limitWriter) Write(p []byte) (int, error) {
+	if l.n >= l.max {
+		return len(p), nil
+	}
+	if int64(len(p))+l.n > l.max {
+		p = p[:l.max-l.n]
+	}
+	n, err := l.w.Write(p)
+	l.n += int64(n)
+	return n, err
 }
 
 func executeRemoteCommandWithSpinner(client *ssh.Client, cmd string, label string) (string, error) {

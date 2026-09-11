@@ -29,6 +29,33 @@ find . -maxdepth 2 -type f \( -name "*.sh" -o -name "*.bash" -o -name "*.py" -o 
 # 3. ENVIRONMENT PATH RESOLUTION
 export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin:/usr/bin:/usr/local/bin:/opt/homebrew/bin:/usr/local/opt/go/bin
 
+# 3b. SELF-HEALING GO CACHE OWNERSHIP GUARD
+fix_go_cache_ownership() {
+    local real_user="${SUDO_USER:-$USER}"
+    [ "$real_user" = "root" ] && return 0
+    [ -z "$real_user" ] && return 0
+
+    local real_home
+    real_home=$(getent passwd "$real_user" 2>/dev/null | cut -d: -f6)
+    [ -z "$real_home" ] && real_home="$HOME"
+
+    local cache_dir="$real_home/.cache/go-build"
+    local mod_dir="$real_home/go"
+
+    for d in "$cache_dir" "$mod_dir"; do
+        [ -d "$d" ] || continue
+        if find "$d" -maxdepth 1 -not -user "$real_user" 2>/dev/null | grep -q .; then
+            echo "==>> [!] Detected foreign-owned Go cache files in $d — auto-repairing ownership..."
+            if [ "$(id -u)" -eq 0 ]; then
+                chown -R "$real_user:$real_user" "$d" 2>/dev/null || true
+            else
+                sudo chown -R "$real_user:$real_user" "$d" 2>/dev/null || true
+            fi
+        fi
+    done
+}
+fix_go_cache_ownership
+
 # 4. FUNCTION: Fallback Manual Go Toolchain Installer
 install_go_manual() {
     echo "==>> Downloading official standalone Go runtime..."
@@ -114,20 +141,19 @@ done
 if [ "$BUILD_ALL" = true ]; then
     echo "==>> Initializing full universal multi-platform build..."
     mkdir -p dist
-    
-    # --- UPDATED: build all .go files (not just main.go) ---
+
     echo "[+] Compiling Linux (x86_64 amd64)..."
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o dist/Cross-Suite_Wizard-linux-amd64 .
-    
+
     echo "[+] Compiling Linux (ARM64)..."
     CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o dist/Cross-Suite_Wizard-linux-arm64 .
-    
+
     echo "[+] Compiling macOS (Intel amd64)..."
     CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o dist/Cross-Suite_Wizard-darwin-amd64 .
-    
+
     echo "[+] Compiling macOS (Apple Silicon arm64)..."
     CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o dist/Cross-Suite_Wizard-darwin-arm64 .
-    
+
     echo "[+] Compiling Windows (x86_64 .exe)..."
     if [ -f cross-ssh.exe.manifest ]; then
         command -v rsrc >/dev/null 2>&1 || go install github.com/akavel/rsrc@latest 2>/dev/null || true
@@ -136,7 +162,7 @@ if [ "$BUILD_ALL" = true ]; then
     CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o dist/Cross-Suite_Wizard-windows-amd64.exe .
     CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o Cross-Suite_Wizard.exe .
     rm -f cross-ssh.syso
-    
+
     chmod +x dist/* Cross-Suite_Wizard.exe 2>/dev/null || true
     echo "==>> Universal binaries ready in ./dist/"
     exit 0
@@ -164,8 +190,25 @@ if [ "$NEEDS_REBUILD" = true ]; then
     fi
 
     echo "[+] Fast compiling Cross-Suite_Wizard (OS: $OS_TYPE, ARCH: $ARCH)..."
-    # --- UPDATED: build all .go files ---
-    CGO_ENABLED=0 GOOS=$OS_TYPE GOARCH=$ARCH go build -ldflags="-s -w" -o "$TARGET_BIN" .
+    BUILD_LOG=$(mktemp)
+    if ! CGO_ENABLED=0 GOOS=$OS_TYPE GOARCH=$ARCH go build -ldflags="-s -w" -o "$TARGET_BIN" . 2>"$BUILD_LOG"; then
+        if grep -qi "permission denied" "$BUILD_LOG"; then
+            echo "==>> [!] Build failed due to a cache permission conflict. Repairing and retrying once..."
+            fix_go_cache_ownership
+            if ! CGO_ENABLED=0 GOOS=$OS_TYPE GOARCH=$ARCH go build -ldflags="-s -w" -o "$TARGET_BIN" . 2>"$BUILD_LOG"; then
+                echo "==>> [!] Build still failing after cache repair:"
+                cat "$BUILD_LOG"
+                rm -f "$BUILD_LOG"
+                exit 1
+            fi
+        else
+            echo "==>> [!] Build failed:"
+            cat "$BUILD_LOG"
+            rm -f "$BUILD_LOG"
+            exit 1
+        fi
+    fi
+    rm -f "$BUILD_LOG"
     chmod +x "$TARGET_BIN"
 fi
 
