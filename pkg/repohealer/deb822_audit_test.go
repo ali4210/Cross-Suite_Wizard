@@ -2,6 +2,9 @@ package repohealer
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -172,5 +175,117 @@ func TestDeb822RepairAuditEventJSONDoesNotContainRawExecutionData(t *testing.T) 
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("audit JSON must not contain %q: %s", forbidden, text)
 		}
+	}
+}
+
+func TestAppendDeb822RepairAuditEventCreatesJSONLAndAppends(t *testing.T) {
+	path := filepath.Join(
+		t.TempDir(),
+		"state",
+		"cross-suite",
+		"repohealer-deb822-audit.jsonl",
+	)
+
+	first := Deb822RepairAuditEvent{
+		Event:           "apt_deb822_repository_repair",
+		OccurredAt:      time.Date(2026, time.September, 12, 0, 0, 0, 0, time.UTC),
+		Status:          Deb822RepairApprovalStatusDeclined,
+		FailureCategory: RepairFailureDeclined,
+	}
+	second := Deb822RepairAuditEvent{
+		Event:           "apt_deb822_repository_repair",
+		OccurredAt:      time.Date(2026, time.September, 12, 0, 1, 0, 0, time.UTC),
+		Status:          Deb822RepairApprovalStatusBlocked,
+		FailureCategory: RepairFailureBlocked,
+	}
+
+	if err := AppendDeb822RepairAuditEvent(path, first); err != nil {
+		t.Fatalf("first append error = %v", err)
+	}
+	if err := AppendDeb822RepairAuditEvent(path, second); err != nil {
+		t.Fatalf("second append error = %v", err)
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("os.ReadFile() error = %v", err)
+	}
+	if !strings.HasSuffix(string(content), "\n") {
+		t.Fatalf("audit log must end with newline: %q", content)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(content)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("line count = %d, want 2; content = %q", len(lines), content)
+	}
+
+	var gotFirst, gotSecond Deb822RepairAuditEvent
+	if err := json.Unmarshal([]byte(lines[0]), &gotFirst); err != nil {
+		t.Fatalf("first JSON line error = %v; line = %q", err, lines[0])
+	}
+	if err := json.Unmarshal([]byte(lines[1]), &gotSecond); err != nil {
+		t.Fatalf("second JSON line error = %v; line = %q", err, lines[1])
+	}
+
+	if gotFirst.Status != Deb822RepairApprovalStatusDeclined {
+		t.Fatalf("first status = %q", gotFirst.Status)
+	}
+	if gotSecond.Status != Deb822RepairApprovalStatusBlocked {
+		t.Fatalf("second status = %q", gotSecond.Status)
+	}
+
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("os.Stat() error = %v", err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Fatalf("audit file mode = %o, want 600", got)
+		}
+
+		parent, err := os.Stat(filepath.Dir(path))
+		if err != nil {
+			t.Fatalf("os.Stat(parent) error = %v", err)
+		}
+		if got := parent.Mode().Perm(); got != 0o700 {
+			t.Fatalf("audit directory mode = %o, want 700", got)
+		}
+	}
+}
+
+func TestAppendDeb822RepairAuditEventRejectsEmptyPath(t *testing.T) {
+	err := AppendDeb822RepairAuditEvent("", Deb822RepairAuditEvent{})
+	if err == nil {
+		t.Fatal("AppendDeb822RepairAuditEvent() error = nil, want error")
+	}
+}
+
+func TestAppendDeb822RepairAuditEventReturnsErrorForDirectoryPath(t *testing.T) {
+	path := t.TempDir()
+
+	err := AppendDeb822RepairAuditEvent(path, Deb822RepairAuditEvent{})
+	if err == nil {
+		t.Fatal("AppendDeb822RepairAuditEvent() error = nil, want error")
+	}
+}
+
+func TestDeb822RepairAuditPathUsesEnvironmentOverride(t *testing.T) {
+	want := filepath.Join(t.TempDir(), "repohealer.jsonl")
+	t.Setenv(deb822RepairAuditPathEnv, "  "+want+"  ")
+
+	if got := Deb822RepairAuditPath(); got != want {
+		t.Fatalf("Deb822RepairAuditPath() = %q, want %q", got, want)
+	}
+}
+
+func TestDeb822RepairAuditPathUsesDefaultWhenUnset(t *testing.T) {
+	t.Setenv(deb822RepairAuditPathEnv, "")
+
+	if got := Deb822RepairAuditPath(); got != defaultDeb822RepairAuditPath {
+		t.Fatalf(
+			"Deb822RepairAuditPath() = %q, want %q",
+			got,
+			defaultDeb822RepairAuditPath,
+		)
 	}
 }
