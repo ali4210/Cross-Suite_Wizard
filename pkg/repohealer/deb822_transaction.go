@@ -167,7 +167,7 @@ echo "DEB822_REPAIR_APPLIED|$PROFILE_ID|fingerprint=$MATCHED_FINGERPRINT"
 	)
 	applyResult.Output = strings.TrimSpace(output)
 
-	if err != nil || !strings.Contains(output, "DEB822_REPAIR_APPLIED|") {
+	if err != nil || !hasDeb822RepairAppliedMarker(output, profile) {
 		if err != nil {
 			if strings.TrimSpace(output) != "" {
 				applyResult.Error = fmt.Errorf(
@@ -183,7 +183,7 @@ echo "DEB822_REPAIR_APPLIED|$PROFILE_ID|fingerprint=$MATCHED_FINGERPRINT"
 			}
 		} else {
 			applyResult.Error = fmt.Errorf(
-				"Deb822 keyring/source repair failed: repair command did not report DEB822_REPAIR_APPLIED",
+				"Deb822 keyring/source repair failed: repair command did not report a valid DEB822_REPAIR_APPLIED marker",
 			)
 		}
 		rollbackDeb822Repair(exec, &applyResult, request.SnapshotTargets)
@@ -238,4 +238,31 @@ func rollbackDeb822Repair(
 			rollbackErr,
 		)
 	}
+}
+
+func hasDeb822RepairAppliedMarker(
+	output string,
+	profile VendorProfile,
+) bool {
+	prefix := "DEB822_REPAIR_APPLIED|" + profile.ID + "|fingerprint="
+
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+
+		fingerprint := strings.TrimSpace(
+			strings.TrimPrefix(line, prefix),
+		)
+		if fingerprint == "" {
+			continue
+		}
+
+		if IsPinnedFingerprint(profile, fingerprint) {
+			return true
+		}
+	}
+
+	return false
 }

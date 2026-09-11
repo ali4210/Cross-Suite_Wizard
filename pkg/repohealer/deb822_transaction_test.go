@@ -265,3 +265,306 @@ func TestApplyDeb822RepairExecutionReportsRollbackFailure(t *testing.T) {
 		)
 	}
 }
+
+func TestHasDeb822RepairAppliedMarker(t *testing.T) {
+	profile := dockerDeb822Profile(t)
+	validFingerprint := profile.ExpectedFingerprints[0]
+
+	tests := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{
+			name: "Exact valid marker",
+			output: "DEB822_REPAIR_APPLIED|docker-ce|fingerprint=" +
+				validFingerprint + "\n",
+			want: true,
+		},
+		{
+			name: "Valid marker among ordinary lines",
+			output: "starting repair\n" +
+				"DEB822_REPAIR_APPLIED|docker-ce|fingerprint=" +
+				validFingerprint + "\n" +
+				"cleanup complete\n",
+			want: true,
+		},
+		{
+			name: "Prefix spoofing is rejected",
+			output: "prefix-DEB822_REPAIR_APPLIED|docker-ce|fingerprint=" +
+				validFingerprint + "\n",
+			want: false,
+		},
+		{
+			name: "Wrong profile is rejected",
+			output: "DEB822_REPAIR_APPLIED|microsoft-vscode|fingerprint=" +
+				validFingerprint + "\n",
+			want: false,
+		},
+		{
+			name: "Unpinned fingerprint is rejected",
+			output: "DEB822_REPAIR_APPLIED|docker-ce|fingerprint=" +
+				"FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF\n",
+			want: false,
+		},
+		{
+			name:   "Empty fingerprint is rejected",
+			output: "DEB822_REPAIR_APPLIED|docker-ce|fingerprint=\n",
+			want:   false,
+		},
+		{
+			name: "Marker embedded in another line is rejected",
+			output: "error: DEB822_REPAIR_APPLIED|docker-ce|fingerprint=" +
+				validFingerprint,
+			want: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := hasDeb822RepairAppliedMarker(test.output, profile)
+			if got != test.want {
+				t.Fatalf(
+					"hasDeb822RepairAppliedMarker(%q) = %t, want %t",
+					test.output,
+					got,
+					test.want,
+				)
+			}
+		})
+	}
+}
+
+func TestApplyDeb822RepairExecutionRejectsInvalidMutationMarkers(t *testing.T) {
+	request := validDockerDeb822ExecutionRequest(t)
+	profile := dockerDeb822Profile(t)
+
+	tests := []struct {
+		name   string
+		output string
+	}{
+		{
+			name:   "Missing marker",
+			output: "repair finished without success record\n",
+		},
+		{
+			name: "Prefix spoofing",
+			output: "prefix-DEB822_REPAIR_APPLIED|docker-ce|fingerprint=" +
+				profile.ExpectedFingerprints[0] + "\n",
+		},
+		{
+			name: "Wrong profile",
+			output: "DEB822_REPAIR_APPLIED|microsoft-vscode|fingerprint=" +
+				profile.ExpectedFingerprints[0] + "\n",
+		},
+		{
+			name: "Unpinned fingerprint",
+			output: "DEB822_REPAIR_APPLIED|docker-ce|fingerprint=" +
+				"FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF\n",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			exec := &fakeExecutor{
+				runSudoOutputs: []string{
+					"",
+					"",
+				},
+				runSudoLabelOutputs: []string{
+					test.output,
+				},
+			}
+
+			got := ApplyDeb822RepairExecution(exec, request)
+
+			if got.Applied {
+				t.Fatalf("invalid marker repair was applied: %#v", got)
+			}
+			if !got.Snapshot.Created {
+				t.Fatalf("snapshot = %#v, want created snapshot", got.Snapshot)
+			}
+			if !got.RolledBack {
+				t.Fatalf("invalid marker repair did not roll back: %#v", got)
+			}
+			if got.Error == nil ||
+				!strings.Contains(
+					got.Error.Error(),
+					"valid DEB822_REPAIR_APPLIED marker",
+				) {
+				t.Fatalf("error = %v, want invalid marker failure", got.Error)
+			}
+			if len(exec.commands) != 4 {
+				t.Fatalf(
+					"command count = %d, want lock, snapshot, mutation, rollback",
+					len(exec.commands),
+				)
+			}
+			if !strings.Contains(
+				exec.commands[3],
+				"sha256sum --strict -c checksums.sha256",
+			) {
+				t.Fatalf(
+					"rollback did not verify snapshot checksums:\n%s",
+					exec.commands[3],
+				)
+			}
+		})
+	}
+}
+
+func TestApplyDeb822RepairExecutionRollsBackOnVerificationMarkers(t *testing.T) {
+	request := validDockerDeb822ExecutionRequest(t)
+	profile := dockerDeb822Profile(t)
+	successMarker := "DEB822_REPAIR_APPLIED|docker-ce|fingerprint=" +
+		profile.ExpectedFingerprints[0] + "\n"
+
+	verificationMarkers := []string{
+		"NO_PUBKEY 0000000000000000",
+		"BADSIG example",
+		"EXPKEYSIG example",
+		"Failed to fetch example",
+	}
+
+	for _, marker := range verificationMarkers {
+		t.Run(marker, func(t *testing.T) {
+			exec := &fakeExecutor{
+				runSudoOutputs: []string{
+					"",
+					"",
+				},
+				runSudoLabelOutputs: []string{
+					successMarker,
+					"Hit:1 repository\n" + marker + "\n",
+				},
+			}
+
+			got := ApplyDeb822RepairExecution(exec, request)
+
+			if got.Applied {
+				t.Fatalf("verification-marker repair was applied: %#v", got)
+			}
+			if !got.RolledBack {
+				t.Fatalf(
+					"verification-marker repair did not roll back: %#v",
+					got,
+				)
+			}
+			if got.Error == nil ||
+				!strings.Contains(
+					got.Error.Error(),
+					"repository trust or fetch errors were reported",
+				) {
+				t.Fatalf("error = %v, want verification marker failure", got.Error)
+			}
+			if len(exec.commands) != 5 {
+				t.Fatalf(
+					"command count = %d, want lock, snapshot, mutation, verification, rollback",
+					len(exec.commands),
+				)
+			}
+		})
+	}
+}
+
+func TestApplyDeb822RepairExecutionRollsBackMutationFailureWithoutOutput(t *testing.T) {
+	request := validDockerDeb822ExecutionRequest(t)
+	exec := &fakeExecutor{
+		runSudoOutputs: []string{
+			"",
+			"",
+		},
+		runSudoLabelErrors: []error{
+			errors.New("exit status 22"),
+		},
+	}
+
+	got := ApplyDeb822RepairExecution(exec, request)
+
+	if got.Applied {
+		t.Fatalf("failed repair was applied: %#v", got)
+	}
+	if !got.RolledBack {
+		t.Fatalf(
+			"repair did not roll back after mutation failure: %#v",
+			got,
+		)
+	}
+	if got.Error == nil ||
+		!strings.Contains(got.Error.Error(), "exit status 22") {
+		t.Fatalf("error = %v, want mutation execution failure", got.Error)
+	}
+	if strings.Contains(got.Error.Error(), "fingerprint_mismatch") {
+		t.Fatalf("error falsely claims fingerprint mismatch: %v", got.Error)
+	}
+	if len(exec.commands) != 4 {
+		t.Fatalf(
+			"command count = %d, want lock, snapshot, mutation, rollback",
+			len(exec.commands),
+		)
+	}
+}
+
+func TestApplyDeb822RepairExecutionBuildsHardenedScopedMutationCommand(t *testing.T) {
+	request := validDockerDeb822ExecutionRequest(t)
+	profile := dockerDeb822Profile(t)
+	exec := &fakeExecutor{
+		runSudoOutputs: []string{
+			"",
+		},
+		runSudoLabelOutputs: []string{
+			"DEB822_REPAIR_APPLIED|docker-ce|fingerprint=" +
+				profile.ExpectedFingerprints[0] + "\n",
+			"Hit:1 repository\n",
+		},
+	}
+
+	got := ApplyDeb822RepairExecution(exec, request)
+	if !got.Applied {
+		t.Fatalf("repair was not applied: %#v", got)
+	}
+
+	mutationCommand := exec.commands[2]
+
+	requiredFragments := []string{
+		"curl -fsSL --proto '=https' --tlsv1.2",
+		`export GNUPGHOME="$TEMP_DIR/gnupg"`,
+		`chmod 0700 "$GNUPGHOME"`,
+		`mv -f "$KEYRING_TMP" "$KEYRING_PATH"`,
+		`mv -f "$SOURCE_TMP" "$SOURCE_FILE"`,
+		"EXPECTED_FINGERPRINTS=(",
+		"RENDERED_SOURCE=" + shellQuote(request.RenderedSource),
+		"KEYRING_PATH=" + shellQuote(request.KeyringPath),
+		"SOURCE_FILE=" + shellQuote(request.SourceFile),
+	}
+
+	for _, fragment := range requiredFragments {
+		if !strings.Contains(mutationCommand, fragment) {
+			t.Fatalf(
+				"mutation command missing required fragment %q:\n%s",
+				fragment,
+				mutationCommand,
+			)
+		}
+	}
+
+	for _, fingerprint := range request.ExpectedFingerprints {
+		if !strings.Contains(mutationCommand, shellQuote(fingerprint)) {
+			t.Fatalf(
+				"mutation command missing request fingerprint %q:\n%s",
+				fingerprint,
+				mutationCommand,
+			)
+		}
+	}
+
+	for _, target := range request.SnapshotTargets {
+		if !strings.Contains(exec.commands[1], shellQuote(target)) {
+			t.Fatalf(
+				"snapshot command missing exact request target %q:\n%s",
+				target,
+				exec.commands[1],
+			)
+		}
+	}
+}
