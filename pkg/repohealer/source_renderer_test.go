@@ -137,3 +137,103 @@ func TestRenderDockerAPTSourceRejectsUnknownParrotLoryVersion(t *testing.T) {
 		t.Fatal("expected unknown Parrot lory version to be rejected")
 	}
 }
+
+func TestRenderDockerDeb822APTSourceForParrot64LoryUsesBookworm(t *testing.T) {
+	profile, ok := FindVendorProfile(
+		ManagerAPT,
+		"https://download.docker.com/linux/debian",
+	)
+	if !ok {
+		t.Fatal("expected Docker profile")
+	}
+
+	got, err := RenderAPTDeb822Source(profile, SourceRenderInput{
+		Architecture: "amd64",
+		Distribution: "debian",
+		Version:      "6.4",
+		Codename:     "lory",
+	})
+	if err != nil {
+		t.Fatalf("RenderAPTDeb822Source() error = %v", err)
+	}
+
+	want := `Types: deb
+URIs: https://download.docker.com/linux/debian
+Suites: bookworm
+Components: stable
+Architectures: amd64
+Signed-By: /etc/apt/keyrings/docker.gpg
+`
+
+	if got != want {
+		t.Fatalf("RenderAPTDeb822Source() = %q, want %q", got, want)
+	}
+}
+
+func TestRenderMicrosoftVSCodeDeb822APTSource(t *testing.T) {
+	profile, ok := FindVendorProfile(
+		ManagerAPT,
+		"https://packages.microsoft.com/repos/code",
+	)
+	if !ok {
+		t.Fatal("expected Microsoft VS Code profile")
+	}
+
+	got, err := RenderAPTDeb822Source(profile, SourceRenderInput{
+		Architecture: "arm64",
+		Distribution: "parrot",
+		Codename:     "lory",
+	})
+	if err != nil {
+		t.Fatalf("RenderAPTDeb822Source() error = %v", err)
+	}
+
+	want := `Types: deb
+URIs: https://packages.microsoft.com/repos/code
+Suites: stable
+Components: main
+Architectures: arm64
+Signed-By: /etc/apt/keyrings/microsoft.gpg
+`
+
+	if got != want {
+		t.Fatalf("RenderAPTDeb822Source() = %q, want %q", got, want)
+	}
+}
+
+func TestRenderAPTDeb822SourceRejectsUnsupportedDockerDistribution(t *testing.T) {
+	profile, ok := FindVendorProfile(
+		ManagerAPT,
+		"https://download.docker.com/linux/debian",
+	)
+	if !ok {
+		t.Fatal("expected Docker profile")
+	}
+
+	_, err := RenderAPTDeb822Source(profile, SourceRenderInput{
+		Architecture: "amd64",
+		Distribution: "ubuntu",
+		Codename:     "noble",
+	})
+	if err == nil {
+		t.Fatal("expected unsupported Docker distribution to be rejected")
+	}
+}
+
+func TestRenderAPTDeb822SourceRejectsEmptyArchitecture(t *testing.T) {
+	profile, ok := FindVendorProfile(
+		ManagerAPT,
+		"https://download.docker.com/linux/debian",
+	)
+	if !ok {
+		t.Fatal("expected Docker profile")
+	}
+
+	_, err := RenderAPTDeb822Source(profile, SourceRenderInput{
+		Distribution: "debian",
+		Codename:     "bookworm",
+	})
+	if err == nil {
+		t.Fatal("expected empty architecture to be rejected")
+	}
+}

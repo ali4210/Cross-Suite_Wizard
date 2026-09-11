@@ -50,6 +50,54 @@ func RenderAPTSource(profile VendorProfile, input SourceRenderInput) (string, er
 	}
 }
 
+func RenderAPTDeb822Source(profile VendorProfile, input SourceRenderInput) (string, error) {
+	if profile.PackageManager != ManagerAPT {
+		return "", fmt.Errorf("profile %q is not an APT profile", profile.ID)
+	}
+
+	architecture := strings.TrimSpace(input.Architecture)
+	if architecture == "" {
+		return "", fmt.Errorf("cannot render %q Deb822 APT source: target architecture is empty", profile.ID)
+	}
+
+	switch profile.ID {
+	case "microsoft-vscode":
+		return fmt.Sprintf(
+			"Types: deb\n"+
+				"URIs: %s\n"+
+				"Suites: stable\n"+
+				"Components: main\n"+
+				"Architectures: %s\n"+
+				"Signed-By: %s\n",
+			profile.AllowedURLPrefixes[0],
+			architecture,
+			profile.KeyringPath,
+		), nil
+
+	case "docker-ce":
+		suite, err := ResolveDockerDebianSuite(input)
+		if err != nil {
+			return "", err
+		}
+
+		return fmt.Sprintf(
+			"Types: deb\n"+
+				"URIs: %s\n"+
+				"Suites: %s\n"+
+				"Components: stable\n"+
+				"Architectures: %s\n"+
+				"Signed-By: %s\n",
+			profile.AllowedURLPrefixes[0],
+			suite,
+			architecture,
+			profile.KeyringPath,
+		), nil
+
+	default:
+		return "", fmt.Errorf("no Deb822 APT source renderer is implemented for profile %q", profile.ID)
+	}
+}
+
 func ResolveDockerDebianSuite(input SourceRenderInput) (string, error) {
 	distribution := strings.ToLower(strings.TrimSpace(input.Distribution))
 	version := strings.TrimSpace(input.Version)
