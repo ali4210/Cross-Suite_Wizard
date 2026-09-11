@@ -290,3 +290,85 @@ func TestDockerRepairUsesAllPinnedFingerprints(t *testing.T) {
 		}
 	}
 }
+
+func TestApplyKnownAPTProfileRepairWithVerificationUsesInjectedFailingVerifier(t *testing.T) {
+	const verificationScript = `
+echo "TEST_VERIFICATION_FAILURE"
+exit 42
+`
+
+	exec := &fakeExecutor{
+		runSudoOutputs: []string{
+			"",
+			"",
+		},
+		runSudoLabelOutputs: []string{
+			"REPAIR_APPLIED|microsoft-vscode|fingerprint=BC528686B50D79E339D3721CEB3E94ADBE1229CF|arch=amd64",
+			"TEST_VERIFICATION_FAILURE",
+		},
+		runSudoLabelErrors: []error{
+			nil,
+			errors.New("exit status 42"),
+		},
+	}
+
+	profile, ok := FindVendorProfile(
+		ManagerAPT,
+		"https://packages.microsoft.com/repos/code",
+	)
+	if !ok {
+		t.Fatal("expected Microsoft VS Code vendor profile")
+	}
+
+	got := applyKnownAPTProfileRepairWithVerification(
+		exec,
+		microsoftRepairResult().Target,
+		profile,
+		verificationScript,
+	)
+
+	if !got.Attempted {
+		t.Fatal("expected repair attempt")
+	}
+	if got.Applied {
+		t.Fatal("an injected verifier failure must prevent repair application")
+	}
+	if !got.RolledBack {
+		t.Fatal("an injected verifier failure must trigger rollback")
+	}
+	if got.Error == nil {
+		t.Fatal("an injected verifier failure must return an error")
+	}
+	if got.VerificationOut != "TEST_VERIFICATION_FAILURE" {
+		t.Fatalf("verification output = %q, want injected verifier output", got.VerificationOut)
+	}
+
+	if len(exec.commands) != 4 {
+		t.Fatalf(
+			"expected snapshot, repair, verification, rollback; got %d commands",
+			len(exec.commands),
+		)
+	}
+
+	verificationCommand := exec.commands[2]
+	if !strings.Contains(verificationCommand, "Verifying APT Repository Health") {
+		t.Fatalf("expected verification label, got:\n%s", verificationCommand)
+	}
+	if !strings.Contains(verificationCommand, "TEST_VERIFICATION_FAILURE") {
+		t.Fatalf(
+			"verification command did not contain injected script:\n%s",
+			verificationCommand,
+		)
+	}
+	if strings.Contains(verificationCommand, "apt-get update") {
+		t.Fatalf(
+			"injected verification command must not fall back to production apt-get update:\n%s",
+			verificationCommand,
+		)
+	}
+
+	rollbackCommand := exec.commands[3]
+	if !strings.Contains(rollbackCommand, "SUDO:") {
+		t.Fatalf("last command must perform rollback, got:\n%s", rollbackCommand)
+	}
+}

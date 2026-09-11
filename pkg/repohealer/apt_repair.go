@@ -37,10 +37,30 @@ func ApplyKnownAPTRepairs(exec Executor, result Result) RepairResult {
 	}
 }
 
+const defaultAPTVerificationScript = `
+set +e
+apt-get update 2>&1
+exit ${PIPESTATUS[0]}
+`
+
 func applyKnownAPTProfileRepair(
 	exec Executor,
 	facts TargetFacts,
 	profile VendorProfile,
+) RepairResult {
+	return applyKnownAPTProfileRepairWithVerification(
+		exec,
+		facts,
+		profile,
+		defaultAPTVerificationScript,
+	)
+}
+
+func applyKnownAPTProfileRepairWithVerification(
+	exec Executor,
+	facts TargetFacts,
+	profile VendorProfile,
+	verificationScript string,
 ) RepairResult {
 	repairResult := RepairResult{
 		Attempted: true,
@@ -193,12 +213,6 @@ echo "REPAIR_APPLIED|$PROFILE_ID|fingerprint=$MATCHED_FINGERPRINT"
 		}
 		return repairResult
 	}
-
-	verificationScript := `
-set +e
-apt-get update 2>&1
-exit ${PIPESTATUS[0]}
-`
 
 	verificationOut, verifyErr := exec.RunSudoWithLabel(
 		verificationScript,
