@@ -3,7 +3,6 @@ package repohealer
 import (
 	"fmt"
 	"strings"
-	"time"
 )
 
 type Deb822RepairApplyResult struct {
@@ -24,6 +23,20 @@ func ApplyDeb822RepairExecution(
 	exec Executor,
 	request Deb822RepairExecutionRequest,
 ) Deb822RepairApplyResult {
+	return applyDeb822RepairExecutionWithOptions(
+		exec,
+		request,
+		defaultDeb822RepairExecutionOptions(),
+	)
+}
+
+func applyDeb822RepairExecutionWithOptions(
+	exec Executor,
+	request Deb822RepairExecutionRequest,
+	options deb822RepairExecutionOptions,
+) Deb822RepairApplyResult {
+	options = normalizeDeb822RepairExecutionOptions(options)
+
 	applyResult := Deb822RepairApplyResult{
 		Attempted:   true,
 		ActionID:    request.ActionID,
@@ -50,7 +63,23 @@ func ApplyDeb822RepairExecution(
 		return applyResult
 	}
 
-	snapshot, err := CreateAPTFileSnapshot(exec, request.SnapshotTargets)
+	snapshotTime := options.now().UTC()
+	snapshotID, err := newAPTFileSnapshotID(snapshotTime)
+	if err != nil {
+		applyResult.Error = fmt.Errorf(
+			"Deb822 repair blocked: could not create targeted APT snapshot ID: %w",
+			err,
+		)
+		return applyResult
+	}
+
+	snapshot, err := createAPTFileSnapshotAtRoot(
+		exec,
+		request.SnapshotTargets,
+		options.snapshotRoot,
+		snapshotTime,
+		snapshotID,
+	)
 	if err != nil {
 		applyResult.Error = fmt.Errorf(
 			"Deb822 repair blocked: could not create targeted APT snapshot: %w",
@@ -61,9 +90,10 @@ func ApplyDeb822RepairExecution(
 	applyResult.Snapshot = snapshot
 
 	tempDir := fmt.Sprintf(
-		"/var/tmp/cross-suite-deb822-repoheal-%s-%d",
+		"%s/cross-suite-deb822-repoheal-%s-%d",
+		strings.TrimRight(options.temporaryRoot, "/"),
 		profile.ID,
-		time.Now().UTC().UnixNano(),
+		options.now().UTC().UnixNano(),
 	)
 
 	script := fmt.Sprintf(`
@@ -118,7 +148,7 @@ while IFS= read -r fingerprint; do
 	done
 done < <(
 	gpg --show-keys --with-colons --fingerprint "$TEMP_DIR/vendor.asc" \
-	| awk -F: '$1 == "fpr" {print toupper($10)}'
+		| awk -F: '$1 == "fpr" {print toupper($10)}'
 )
 
 if [ -z "$MATCHED_FINGERPRINT" ]; then
@@ -191,7 +221,7 @@ echo "DEB822_REPAIR_APPLIED|$PROFILE_ID|fingerprint=$MATCHED_FINGERPRINT"
 	}
 
 	verificationOut, verifyErr := exec.RunSudoWithLabel(
-		defaultAPTVerificationScript,
+		options.verificationScript,
 		"Verifying Deb822 APT Repository Health",
 	)
 	applyResult.VerificationOut = strings.TrimSpace(verificationOut)
