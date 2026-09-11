@@ -290,3 +290,59 @@ func TestDeb822PreviewDefaultDoesNotEnterApplyMode(t *testing.T) {
 		)
 	}
 }
+
+func TestCanProceedToDeb822InspectionUsesDoctorPreviewPermission(t *testing.T) {
+	tests := []struct {
+		name   string
+		report repohealer.Deb822DoctorReport
+		want   bool
+	}{
+		{
+			name: "Ready permits inspection",
+			report: repohealer.Deb822DoctorReport{
+				Overall:    repohealer.Deb822DoctorStatusReady,
+				CanPreview: true,
+				CanApply:   true,
+			},
+			want: true,
+		},
+		{
+			name: "Warning permits inspection",
+			report: repohealer.Deb822DoctorReport{
+				Overall:    repohealer.Deb822DoctorStatusWarning,
+				CanPreview: true,
+				CanApply:   false,
+			},
+			want: true,
+		},
+		{
+			name: "Blocked prevents inspection",
+			report: repohealer.Deb822DoctorReport{
+				Overall:    repohealer.Deb822DoctorStatusBlocked,
+				CanPreview: false,
+			},
+			want: false,
+		},
+		{
+			name: "Unsupported prevents inspection",
+			report: repohealer.Deb822DoctorReport{
+				Overall:    repohealer.Deb822DoctorStatusUnsupported,
+				CanPreview: false,
+			},
+			want: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := canProceedToDeb822Inspection(test.report); got != test.want {
+				t.Fatalf(
+					"canProceedToDeb822Inspection(%#v) = %t, want %t",
+					test.report,
+					got,
+					test.want,
+				)
+			}
+		})
+	}
+}

@@ -77,6 +77,21 @@ func runSelectedRepositoryRepairFlow(
 	fmt.Println("\n" + repohealer.FormatRepairAction(selectedAction))
 
 	if !selectedAction.Eligible {
+		doctor := repohealer.DiagnoseSelectedDeb822RepairReadiness(
+			result.Target,
+			selectedAction,
+		)
+		fmt.Println("\n" + repohealer.FormatDeb822DoctorReport(doctor))
+
+		if !canProceedToDeb822Inspection(doctor) {
+			fmt.Println(
+				Yellow +
+					"[BLOCKED] Deb822 Doctor did not permit inspection. No system changes were made." +
+					Reset,
+			)
+			return
+		}
+
 		inspection, inspected := inspectSelectedDeb822Repair(
 			client,
 			result,
@@ -149,6 +164,12 @@ func runSelectedRepositoryRepairFlow(
 		audit.Decision,
 		audit.FailureCategory,
 	)
+}
+
+func canProceedToDeb822Inspection(
+	report repohealer.Deb822DoctorReport,
+) bool {
+	return report.CanPreview
 }
 
 func inspectSelectedDeb822Repair(

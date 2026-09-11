@@ -113,6 +113,16 @@ jq . "$CROSS_SUITE_DEB822_AUDIT_PATH"
 stat -c '%a %U:%G %n' "$CROSS_SUITE_DEB822_AUDIT_PATH"
 ```
 
+## Doctor preflight
+
+Before Repo Healer reads a selected Deb822 source or offers a preview, it runs a local Doctor preflight report for the selected action.
+
+Doctor is read-only. It does not connect to the target, invoke `sudo`, create snapshots, write source or keyring files, download keys, or run `apt-get update`.
+
+Doctor reports `READY`, `WARNING`, `BLOCKED`, or `UNSUPPORTED` and checks the selected action's source format, required binding fields, verified vendor profile, repository URL binding, keyring binding, approved Deb822 source-path scope, target-facts match, local execution-policy state, and local audit-path readiness.
+
+`READY` and `WARNING` allow the tool to continue to remote Deb822 inspection and preview. `BLOCKED` and `UNSUPPORTED` stop before remote source inspection. `WARNING` may still prevent apply; for example, a disabled execution policy allows preview but not mutation.
+
 ## Preview and apply flow
 
 Deb822 repair begins in preview mode. Preview validates the inspected source and the exact bound repair request, then displays the approved source file, keyring path, snapshot scope, pinned signing-key fingerprints, and rendered Deb822 replacement.
