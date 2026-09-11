@@ -42,7 +42,9 @@ func runSelectedRepositoryRepairFlow(
 
 	selection := strings.TrimSpace(
 		transfer.ReadRealtimeInput(
-			"Select one repair action [1-" + fmt.Sprintf("%d", len(result.Actions)) + "] or 0 to cancel: ",
+			"Select one repair action [1-" +
+				fmt.Sprintf("%d", len(result.Actions)) +
+				"] or 0 to cancel: ",
 		),
 	)
 
@@ -50,18 +52,47 @@ func runSelectedRepositoryRepairFlow(
 		selection == "0" ||
 		strings.EqualFold(selection, "q") ||
 		strings.EqualFold(selection, "back") {
-		fmt.Println(Yellow + "[!] Repair selection canceled. No system changes were made." + Reset)
+		fmt.Println(
+			Yellow +
+				"[!] Repair selection canceled. No system changes were made." +
+				Reset,
+		)
 		return
 	}
 
-	selectedAction, selected := selectRepositoryRepairAction(result.Actions, selection)
+	selectedAction, selected := selectRepositoryRepairAction(
+		result.Actions,
+		selection,
+	)
 	if !selected {
-		fmt.Println(Yellow + "[!] Invalid repair action selection. No system changes were made." + Reset)
+		fmt.Println(
+			Yellow +
+				"[!] Invalid repair action selection. No system changes were made." +
+				Reset,
+		)
 		return
 	}
+
 	fmt.Println("\n" + repohealer.FormatRepairAction(selectedAction))
 
 	if !selectedAction.Eligible {
+		inspection, inspected := inspectSelectedDeb822Repair(
+			client,
+			result,
+			selectedAction,
+		)
+		if inspected {
+			fmt.Println(
+				Cyan +
+					"\n[INSPECTION ONLY] Reading and validating the approved Deb822 source. No repair will run." +
+					Reset,
+			)
+			fmt.Println(
+				"\n" + repohealer.FormatDeb822RepairInspection(inspection),
+			)
+			return
+		}
+
 		fmt.Println(
 			Yellow +
 				"[BLOCKED] This repair action is not approved for the detected target. No system changes were made." +
@@ -102,4 +133,52 @@ func runSelectedRepositoryRepairFlow(
 		audit.Decision,
 		audit.FailureCategory,
 	)
+}
+
+func inspectSelectedDeb822Repair(
+	client *ssh.Client,
+	result repohealer.Result,
+	action repohealer.RepairAction,
+) (repohealer.Deb822RepairInspection, bool) {
+	if action.Eligible ||
+		action.RequiresConsent ||
+		action.SourceFormat != repohealer.SourceFormatDeb822 {
+		return repohealer.Deb822RepairInspection{}, false
+	}
+
+	profile, ok := repohealer.FindVendorProfile(
+		repohealer.ManagerAPT,
+		action.RepositoryURL,
+	)
+	if !ok || profile.ID != action.ProfileID {
+		return repohealer.Deb822RepairInspection{}, false
+	}
+
+	findingMatched := false
+	for _, finding := range result.Findings {
+		if finding.Code == action.FindingCode &&
+			finding.RepositoryURL == action.RepositoryURL &&
+			finding.SourceFile == action.SourceFile &&
+			finding.SourceLine == action.SourceLine &&
+			finding.SourceFormat == action.SourceFormat {
+			findingMatched = true
+			break
+		}
+	}
+
+	if !findingMatched {
+		return repohealer.Deb822RepairInspection{}, false
+	}
+
+	inspectionAction := action
+	inspectionAction.Eligible = true
+	inspectionAction.RequiresConsent = true
+
+	inspection := repohealer.InspectApprovedDeb822Repair(
+		repoHealerExecutor{client: client},
+		inspectionAction,
+		profile,
+	)
+
+	return inspection, true
 }
