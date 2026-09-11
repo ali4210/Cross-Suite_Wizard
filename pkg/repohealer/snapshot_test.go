@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCreateAPTFileSnapshotRecordsPresentAndAbsentStates(t *testing.T) {
@@ -39,7 +40,8 @@ func TestCreateAPTFileSnapshotRecordsPresentAndAbsentStates(t *testing.T) {
 	for _, expected := range []string{
 		"SUDO:",
 		`TARGETS=("/etc/apt/sources.list.d/docker.list" "/etc/apt/keyrings/docker.gpg")`,
-		`install -d -m 0700 "$SNAPSHOT_DIR"`,
+		`install -d -m 0700 "$SNAPSHOT_ROOT"`,
+		`mkdir -m 0700 "$SNAPSHOT_DIR"`,
 		`install -d -m 0700 "$SNAPSHOT_DIR/files"`,
 		`chmod 0600 "$SNAPSHOT_DIR/manifest.txt"`,
 		`if [ -e "$target" ]; then`,
@@ -225,5 +227,120 @@ func TestRestoreAPTFileSnapshotRejectsInvalidSnapshot(t *testing.T) {
 	}
 	if len(exec.commands) != 0 {
 		t.Fatalf("invalid snapshot must not execute commands; got %d", len(exec.commands))
+	}
+}
+
+func TestNewAPTFileSnapshotIDProducesDistinctIDsAtSameTime(t *testing.T) {
+	now := time.Date(2026, time.September, 12, 1, 4, 0, 0, time.UTC)
+
+	first, err := newAPTFileSnapshotID(now)
+	if err != nil {
+		t.Fatalf("newAPTFileSnapshotID() first error = %v", err)
+	}
+
+	second, err := newAPTFileSnapshotID(now)
+	if err != nil {
+		t.Fatalf("newAPTFileSnapshotID() second error = %v", err)
+	}
+
+	if first == second {
+		t.Fatalf("snapshot IDs must be unique, both were %q", first)
+	}
+
+	for _, id := range []string{first, second} {
+		if !strings.HasPrefix(id, "apt-20260912T010400Z-") {
+			t.Fatalf("snapshot ID %q has unexpected timestamp prefix", id)
+		}
+		if strings.Contains(id, "/") || strings.Contains(id, "\\") {
+			t.Fatalf("snapshot ID %q must not contain path separators", id)
+		}
+	}
+}
+
+func TestCreateAPTFileSnapshotAtRootRejectsInvalidIDWithoutCommands(t *testing.T) {
+	now := time.Date(2026, time.September, 12, 1, 4, 1, 0, time.UTC)
+
+	for _, snapshotID := range []string{
+		"",
+		".",
+		"..",
+		"not-an-apt-snapshot",
+		"apt-../escape",
+		"apt-test/child",
+		`apt-test\child`,
+	} {
+		t.Run(snapshotID, func(t *testing.T) {
+			exec := &fakeExecutor{}
+
+			snapshot, err := createAPTFileSnapshotAtRoot(
+				exec,
+				[]string{"/etc/apt/keyrings/docker.gpg"},
+				"/var/lib/cross-suite/snapshots",
+				now,
+				snapshotID,
+			)
+
+			if err == nil {
+				t.Fatalf("invalid snapshot ID %q unexpectedly succeeded", snapshotID)
+			}
+			if snapshot.Created {
+				t.Fatalf(
+					"invalid snapshot ID %q must not create a snapshot",
+					snapshotID,
+				)
+			}
+			if len(exec.commands) != 0 {
+				t.Fatalf(
+					"invalid snapshot ID %q must not execute commands: %v",
+					snapshotID,
+					exec.commands,
+				)
+			}
+		})
+	}
+}
+
+func TestCreateAPTFileSnapshotAtRootReturnsUncreatedSnapshotOnCollision(t *testing.T) {
+	exec := &fakeExecutor{
+		runSudoErrors: []error{
+			errors.New("mkdir: cannot create directory: File exists"),
+		},
+	}
+
+	now := time.Date(2026, time.September, 12, 1, 4, 2, 0, time.UTC)
+	snapshot, err := createAPTFileSnapshotAtRoot(
+		exec,
+		[]string{"/etc/apt/keyrings/docker.gpg"},
+		"/var/lib/cross-suite/snapshots",
+		now,
+		"apt-collision-test",
+	)
+
+	if err == nil {
+		t.Fatal("snapshot collision must return an error")
+	}
+	if snapshot.Created {
+		t.Fatal("collision must not return a created snapshot")
+	}
+	if snapshot.ID != "apt-collision-test" {
+		t.Fatalf("snapshot ID = %q", snapshot.ID)
+	}
+	if snapshot.Path != "/var/lib/cross-suite/snapshots/apt-collision-test" {
+		t.Fatalf("snapshot path = %q", snapshot.Path)
+	}
+	if len(exec.commands) != 1 {
+		t.Fatalf("collision must attempt exactly one command, got %d", len(exec.commands))
+	}
+	if !strings.Contains(exec.commands[0], `mkdir -m 0700 "$SNAPSHOT_DIR"`) {
+		t.Fatalf(
+			"collision-safe snapshot command must use non-idempotent mkdir:\n%s",
+			exec.commands[0],
+		)
+	}
+	if strings.Contains(exec.commands[0], `install -d -m 0700 "$SNAPSHOT_DIR"`) {
+		t.Fatalf(
+			"snapshot command must not use idempotent parent directory creation:\n%s",
+			exec.commands[0],
+		)
 	}
 }

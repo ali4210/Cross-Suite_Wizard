@@ -100,6 +100,7 @@ func TestAPTSnapshotRestoreRoundTripOnTemporaryFilesystem(t *testing.T) {
 		[]string{sourceFile, keyringFile},
 		snapshotRoot,
 		fixedTime,
+		"apt-integration-roundtrip",
 	)
 	if err != nil {
 		t.Fatalf("createAPTFileSnapshotAtRoot() error = %v", err)
@@ -180,6 +181,7 @@ func TestAPTSnapshotRestoreRemovesOriginallyAbsentFileOnTemporaryFilesystem(t *t
 		[]string{presentFile, originallyAbsentFile},
 		snapshotRoot,
 		fixedTime,
+		"apt-integration-absent",
 	)
 	if err != nil {
 		t.Fatalf("createAPTFileSnapshotAtRoot() error = %v", err)
@@ -226,6 +228,7 @@ func TestAPTSnapshotRestoreRejectsTamperedTemporarySnapshot(t *testing.T) {
 		[]string{target},
 		snapshotRoot,
 		fixedTime,
+		"apt-integration-tamper",
 	)
 	if err != nil {
 		t.Fatalf("createAPTFileSnapshotAtRoot() error = %v", err)

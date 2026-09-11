@@ -1,7 +1,10 @@
 package repohealer
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -10,12 +13,36 @@ import (
 const defaultAPTSnapshotRoot = "/var/lib/cross-suite/snapshots"
 
 func CreateAPTFileSnapshot(exec Executor, files []string) (Snapshot, error) {
+	now := time.Now().UTC()
+
+	snapshotID, err := newAPTFileSnapshotID(now)
+	if err != nil {
+		return Snapshot{
+			CreatedAt: now,
+			Created:   false,
+		}, fmt.Errorf("create APT snapshot ID: %w", err)
+	}
+
 	return createAPTFileSnapshotAtRoot(
 		exec,
 		files,
 		defaultAPTSnapshotRoot,
-		time.Now().UTC(),
+		now,
+		snapshotID,
 	)
+}
+
+func newAPTFileSnapshotID(now time.Time) (string, error) {
+	randomBytes := make([]byte, 12)
+	if _, err := rand.Read(randomBytes); err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf(
+		"apt-%s-%s",
+		now.UTC().Format("20060102T150405Z"),
+		hex.EncodeToString(randomBytes),
+	), nil
 }
 
 func createAPTFileSnapshotAtRoot(
@@ -23,18 +50,52 @@ func createAPTFileSnapshotAtRoot(
 	files []string,
 	snapshotRoot string,
 	now time.Time,
+	snapshotID string,
 ) (Snapshot, error) {
-	id := "apt-" + now.Format("20060102T150405Z")
-	path := strings.TrimRight(snapshotRoot, "/") + "/" + id
+	snapshotRoot = strings.TrimSpace(snapshotRoot)
+	snapshotID = strings.TrimSpace(snapshotID)
+
+	if err := validateAPTFileSnapshotRoot(snapshotRoot); err != nil {
+		return Snapshot{
+			ID:        snapshotID,
+			CreatedAt: now,
+			Created:   false,
+		}, err
+	}
+
+	if err := validateAPTFileSnapshotID(snapshotID); err != nil {
+		return Snapshot{
+			ID:        snapshotID,
+			CreatedAt: now,
+			Created:   false,
+		}, err
+	}
+
+	snapshotPath := path.Join(snapshotRoot, snapshotID)
+	if path.Dir(snapshotPath) != strings.TrimRight(snapshotRoot, "/") {
+		return Snapshot{
+				ID:        snapshotID,
+				Path:      snapshotPath,
+				CreatedAt: now,
+				Created:   false,
+			}, fmt.Errorf(
+				"invalid APT snapshot path %q outside root %q",
+				snapshotPath,
+				snapshotRoot,
+			)
+	}
+
 	targets := shellArray(files)
 
 	script := fmt.Sprintf(`
 set -eu
 
+SNAPSHOT_ROOT=%s
 SNAPSHOT_DIR=%s
 TARGETS=(%s)
 
-install -d -m 0700 "$SNAPSHOT_DIR"
+install -d -m 0700 "$SNAPSHOT_ROOT"
+mkdir -m 0700 "$SNAPSHOT_DIR"
 install -d -m 0700 "$SNAPSHOT_DIR/files"
 
 cat > "$SNAPSHOT_DIR/manifest.txt" <<'MANIFEST'
@@ -80,28 +141,65 @@ done
 
 chmod 0600 "$SNAPSHOT_DIR/checksums.sha256"
 `,
-		shellQuote(path),
+		shellQuote(snapshotRoot),
+		shellQuote(snapshotPath),
 		targets,
-		id,
-		now.Format(time.RFC3339),
+		snapshotID,
+		now.UTC().Format(time.RFC3339),
 	)
 
 	_, err := exec.RunSudo(script)
 	if err != nil {
 		return Snapshot{
-			ID:        id,
-			Path:      path,
+			ID:        snapshotID,
+			Path:      snapshotPath,
 			CreatedAt: now,
 			Created:   false,
 		}, err
 	}
 
 	return Snapshot{
-		ID:        id,
-		Path:      path,
+		ID:        snapshotID,
+		Path:      snapshotPath,
 		CreatedAt: now,
 		Created:   true,
 	}, nil
+}
+
+func validateAPTFileSnapshotRoot(snapshotRoot string) error {
+	if snapshotRoot == "" {
+		return fmt.Errorf("APT snapshot root is empty")
+	}
+
+	cleaned := path.Clean(snapshotRoot)
+	if !strings.HasPrefix(cleaned, "/") || cleaned == "/" {
+		return fmt.Errorf("APT snapshot root %q must be an absolute non-root path", snapshotRoot)
+	}
+
+	return nil
+}
+
+func validateAPTFileSnapshotID(snapshotID string) error {
+	if snapshotID == "" {
+		return fmt.Errorf("APT snapshot ID is empty")
+	}
+
+	if snapshotID == "." ||
+		snapshotID == ".." ||
+		strings.Contains(snapshotID, "/") ||
+		strings.Contains(snapshotID, "\\") {
+		return fmt.Errorf("APT snapshot ID %q is invalid", snapshotID)
+	}
+
+	if !strings.HasPrefix(snapshotID, "apt-") {
+		return fmt.Errorf(
+			"APT snapshot ID %q must begin with %q",
+			snapshotID,
+			"apt-",
+		)
+	}
+
+	return nil
 }
 
 func RestoreAPTFileSnapshot(exec Executor, snapshot Snapshot, files []string) error {
