@@ -307,3 +307,27 @@ Signed-By: /etc/apt/keyrings/docker.gpg`,
 		})
 	}
 }
+
+func TestValidateSingleProfileDeb822DocumentRejectsExactMarkdownWrappedDockerURI(t *testing.T) {
+	profile := dockerDeb822Profile(t)
+
+	document := `Types: deb
+URIs: [https://download.docker.com/linux/debian](https://download.docker.com/linux/debian)
+Suites: bookworm
+Components: stable
+Architectures: amd64
+Signed-By: /etc/apt/keyrings/docker.gpg
+`
+
+	got := ValidateSingleProfileDeb822Document(document, profile)
+
+	if got.Valid {
+		t.Fatalf("Markdown-wrapped URI unexpectedly validated: %#v", got)
+	}
+	if !strings.Contains(got.Reason, "plain HTTPS repository URL") {
+		t.Fatalf(
+			"reason = %q, want plain HTTPS URL rejection",
+			got.Reason,
+		)
+	}
+}
