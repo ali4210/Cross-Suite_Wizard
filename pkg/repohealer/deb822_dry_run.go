@@ -1,6 +1,41 @@
 package repohealer
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
+
+type Deb822RepairPreviewAuditEvent struct {
+	Event           string                `json:"event"`
+	OccurredAt      time.Time             `json:"occurred_at"`
+	Ready           bool                  `json:"ready"`
+	ActionID        string                `json:"action_id,omitempty"`
+	ProfileID       string                `json:"profile_id,omitempty"`
+	SourceFile      string                `json:"source_file,omitempty"`
+	KeyringPath     string                `json:"keyring_path,omitempty"`
+	FailureCategory RepairFailureCategory `json:"failure_category,omitempty"`
+}
+
+func BuildDeb822RepairPreviewAuditEvent(
+	preview Deb822RepairDryRunResult,
+	occurredAt time.Time,
+) Deb822RepairPreviewAuditEvent {
+	event := Deb822RepairPreviewAuditEvent{
+		Event:       "apt_deb822_repository_repair_preview",
+		OccurredAt:  occurredAt.UTC(),
+		Ready:       preview.Ready,
+		ActionID:    preview.ActionID,
+		ProfileID:   preview.ProfileID,
+		SourceFile:  preview.SourceFile,
+		KeyringPath: preview.KeyringPath,
+	}
+
+	if !preview.Ready {
+		event.FailureCategory = RepairFailureBlocked
+	}
+
+	return event
+}
 
 type Deb822RepairDryRunResult struct {
 	Ready                bool

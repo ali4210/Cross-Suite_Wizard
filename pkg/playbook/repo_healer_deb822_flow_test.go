@@ -244,3 +244,49 @@ func TestAppendDeb822RepairAuditWritesBlockedDecision(t *testing.T) {
 		)
 	}
 }
+
+func TestShouldContinueDeb822RepairAfterPreviewRequiresExplicitApplyMode(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{name: "Empty defaults to preview exit", input: "", want: false},
+		{name: "Whitespace defaults to preview exit", input: " ", want: false},
+		{name: "Preview defaults to preview exit", input: "p", want: false},
+		{name: "Cancel defaults to preview exit", input: "q", want: false},
+		{name: "No defaults to preview exit", input: "no", want: false},
+		{name: "Yes does not skip apply mode", input: "yes", want: false},
+		{name: "Long apply does not bypass exact mode", input: "apply", want: false},
+		{name: "Exact apply mode", input: "a", want: true},
+		{name: "Uppercase apply mode", input: "A", want: true},
+		{name: "Trimmed apply mode", input: "  a  ", want: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := shouldContinueDeb822RepairAfterPreview(test.input); got != test.want {
+				t.Fatalf(
+					"shouldContinueDeb822RepairAfterPreview(%q) = %t, want %t",
+					test.input,
+					got,
+					test.want,
+				)
+			}
+		})
+	}
+}
+
+func TestDeb822PreviewDefaultDoesNotEnterApplyMode(t *testing.T) {
+	if shouldContinueDeb822RepairAfterPreview("") {
+		t.Fatal(
+			"empty preview response must exit without entering apply confirmation",
+		)
+	}
+
+	if shouldContinueDeb822RepairAfterPreview("yes") {
+		t.Fatal(
+			"approval text must not bypass explicit preview-to-apply selection",
+		)
+	}
+}

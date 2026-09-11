@@ -218,6 +218,54 @@ func runSelectedDeb822RepairExecutionFlow(
 		return
 	}
 
+	preview := repohealer.PreviewDeb822Repair(inspection, request)
+	fmt.Println("\n" + repohealer.FormatDeb822RepairDryRun(preview))
+
+	auditPath := repohealer.Deb822RepairAuditPath()
+	previewAudit := repohealer.BuildDeb822RepairPreviewAuditEvent(
+		preview,
+		time.Now(),
+	)
+	if err := repohealer.AppendDeb822RepairPreviewAuditEvent(
+		auditPath,
+		previewAudit,
+	); err != nil {
+		fmt.Fprintf(
+			os.Stderr,
+			Yellow+
+				"WARNING: Deb822 preview was completed, but its audit event could not be persisted to %q: %v\n"+
+				Reset,
+			auditPath,
+			err,
+		)
+	} else {
+		fmt.Printf(
+			Cyan+
+				"Preview audit record written: %s (ready=%t)\n"+
+				Reset,
+			auditPath,
+			previewAudit.Ready,
+		)
+	}
+
+	if !preview.Ready {
+		return
+	}
+
+	mode := strings.TrimSpace(
+		transfer.ReadRealtimeInput(
+			"Type a to continue to apply confirmation, or press Enter to exit after preview: ",
+		),
+	)
+	if !shouldContinueDeb822RepairAfterPreview(mode) {
+		fmt.Println(
+			Yellow +
+				"[PREVIEW COMPLETE] No system changes were made." +
+				Reset,
+		)
+		return
+	}
+
 	fmt.Println(
 		Red + Bold +
 			"\n[!] APPLY MODE: The reviewed Deb822 repair may modify only the displayed source and keyring files." +
@@ -244,10 +292,8 @@ func runSelectedDeb822RepairExecutionFlow(
 
 	fmt.Println("\n" + repohealer.FormatDeb822RepairApprovalResult(execution))
 
-	auditPath := repohealer.Deb822RepairAuditPath()
 	audit := repohealer.BuildDeb822RepairAuditEvent(execution, time.Now())
-
-	if err := appendDeb822RepairAudit(auditPath, audit); err != nil {
+	if err := repohealer.AppendDeb822RepairAuditEvent(auditPath, audit); err != nil {
 		fmt.Fprintf(
 			os.Stderr,
 			Yellow+
@@ -273,4 +319,8 @@ func appendDeb822RepairAudit(
 	audit repohealer.Deb822RepairAuditEvent,
 ) error {
 	return repohealer.AppendDeb822RepairAuditEvent(auditPath, audit)
+}
+
+func shouldContinueDeb822RepairAfterPreview(input string) bool {
+	return strings.EqualFold(strings.TrimSpace(input), "a")
 }

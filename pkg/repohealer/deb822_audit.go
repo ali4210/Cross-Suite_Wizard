@@ -66,6 +66,17 @@ func AppendDeb822RepairAuditEvent(
 	path string,
 	event Deb822RepairAuditEvent,
 ) error {
+	return appendDeb822RepairAuditJSONL(path, event)
+}
+
+func AppendDeb822RepairPreviewAuditEvent(
+	path string,
+	event Deb822RepairPreviewAuditEvent,
+) error {
+	return appendDeb822RepairAuditJSONL(path, event)
+}
+
+func appendDeb822RepairAuditJSONL(path string, event any) error {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return errors.New("Deb822 audit path is empty")

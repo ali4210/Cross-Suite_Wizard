@@ -1,8 +1,10 @@
 package repohealer
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestPreviewDeb822RepairReturnsExactBoundReview(t *testing.T) {
@@ -125,5 +127,84 @@ func TestPreviewDeb822RepairDoesNotRequireExecutionPolicy(t *testing.T) {
 			"preview must remain available while execution policy is disabled: %s",
 			got.Reason,
 		)
+	}
+}
+
+func TestBuildDeb822RepairPreviewAuditEvent(t *testing.T) {
+	inspection, request := readyDockerDeb822ApprovalInputs(t)
+	preview := PreviewDeb822Repair(inspection, request)
+	occurredAt := time.Date(2026, time.September, 12, 0, 0, 0, 0, time.UTC)
+
+	got := BuildDeb822RepairPreviewAuditEvent(preview, occurredAt)
+
+	if got.Event != "apt_deb822_repository_repair_preview" {
+		t.Fatalf("event = %q", got.Event)
+	}
+	if !got.Ready {
+		t.Fatalf("ready = false, want true")
+	}
+	if got.ActionID != request.ActionID {
+		t.Fatalf("action ID = %q, want %q", got.ActionID, request.ActionID)
+	}
+	if got.ProfileID != request.ProfileID {
+		t.Fatalf("profile ID = %q, want %q", got.ProfileID, request.ProfileID)
+	}
+	if !got.OccurredAt.Equal(occurredAt) {
+		t.Fatalf("occurred at = %s, want %s", got.OccurredAt, occurredAt)
+	}
+	if got.FailureCategory != "" {
+		t.Fatalf("failure category = %q, want empty", got.FailureCategory)
+	}
+}
+
+func TestBuildDeb822RepairPreviewAuditEventForBlockedPreview(t *testing.T) {
+	event := BuildDeb822RepairPreviewAuditEvent(
+		Deb822RepairDryRunResult{
+			ActionID:    "apt-source-binding-repair-docker-ce",
+			ProfileID:   "docker-ce",
+			SourceFile:  "/etc/apt/sources.list.d/docker.sources",
+			KeyringPath: "/etc/apt/keyrings/docker.gpg",
+			Reason:      "SECRET_BLOCK_REASON_DO_NOT_LOG",
+		},
+		time.Now(),
+	)
+
+	if event.Ready {
+		t.Fatalf("ready = true, want false")
+	}
+	if event.FailureCategory != RepairFailureBlocked {
+		t.Fatalf(
+			"failure category = %q, want %q",
+			event.FailureCategory,
+			RepairFailureBlocked,
+		)
+	}
+}
+
+func TestDeb822RepairPreviewAuditEventDoesNotContainRenderedSourceOrReason(t *testing.T) {
+	event := BuildDeb822RepairPreviewAuditEvent(
+		Deb822RepairDryRunResult{
+			ActionID:       "apt-source-binding-repair-docker-ce",
+			ProfileID:      "docker-ce",
+			SourceFile:     "/etc/apt/sources.list.d/docker.sources",
+			KeyringPath:    "/etc/apt/keyrings/docker.gpg",
+			RenderedSource: "SECRET_RENDERED_SOURCE_DO_NOT_LOG",
+			Reason:         "SECRET_PREVIEW_REASON_DO_NOT_LOG",
+		},
+		time.Now(),
+	)
+
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	for _, forbidden := range []string{
+		"SECRET_RENDERED_SOURCE_DO_NOT_LOG",
+		"SECRET_PREVIEW_REASON_DO_NOT_LOG",
+	} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("preview audit JSON must not contain %q: %s", forbidden, encoded)
+		}
 	}
 }

@@ -113,6 +113,26 @@ jq . "$CROSS_SUITE_DEB822_AUDIT_PATH"
 stat -c '%a %U:%G %n' "$CROSS_SUITE_DEB822_AUDIT_PATH"
 ```
 
+## Preview and apply flow
+
+Deb822 repair begins in preview mode. Preview validates the inspected source and the exact bound repair request, then displays the approved source file, keyring path, snapshot scope, pinned signing-key fingerprints, and rendered Deb822 replacement.
+
+Preview mode does not invoke privileged commands, create a target snapshot, modify a source or keyring file, download a key, or run `apt-get update`. Preview remains available even when Deb822 repair execution policy is disabled.
+
+After the preview, Repo Healer exits without changes unless the operator enters exactly `a` to proceed to apply confirmation. Values such as an empty response, `p`, `q`, `no`, `yes`, or `apply` exit after preview and do not reach the apply-confirmation prompt.
+
+After entering `a`, the operator must still enter explicit approval (`yes` or `y`) for the displayed repair. Mutation remains disabled unless the local process environment also contains:
+
+```bash
+export CROSS_SUITE_DEB822_REPAIR_ENABLED=true
+```
+
+This produces three separate controls for a real repair:
+
+1. A safe and bound inspection/request.
+2. An explicit preview-to-apply selection followed by typed approval.
+3. A local operator execution-policy opt-in.
+
 ## Operator procedure
 
 1. Run Repo Healer diagnosis for the target.

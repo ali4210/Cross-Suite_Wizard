@@ -289,3 +289,50 @@ func TestDeb822RepairAuditPathUsesDefaultWhenUnset(t *testing.T) {
 		)
 	}
 }
+
+func TestAppendDeb822RepairPreviewAuditEventWritesRedactedJSONL(t *testing.T) {
+	path := filepath.Join(
+		t.TempDir(),
+		"state",
+		"cross-suite",
+		"repohealer-deb822-audit.jsonl",
+	)
+
+	event := Deb822RepairPreviewAuditEvent{
+		Event:           "apt_deb822_repository_repair_preview",
+		OccurredAt:      time.Date(2026, time.September, 12, 0, 0, 0, 0, time.UTC),
+		Ready:           true,
+		ActionID:        "apt-source-binding-repair-docker-ce",
+		ProfileID:       "docker-ce",
+		SourceFile:      "/etc/apt/sources.list.d/docker.sources",
+		KeyringPath:     "/etc/apt/keyrings/docker.gpg",
+		FailureCategory: "",
+	}
+
+	if err := AppendDeb822RepairPreviewAuditEvent(path, event); err != nil {
+		t.Fatalf("AppendDeb822RepairPreviewAuditEvent() error = %v", err)
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("os.ReadFile() error = %v", err)
+	}
+
+	var got Deb822RepairPreviewAuditEvent
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(content))), &got); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	if got.Event != event.Event {
+		t.Fatalf("event = %q, want %q", got.Event, event.Event)
+	}
+	if !got.Ready {
+		t.Fatal("ready = false, want true")
+	}
+	if got.ActionID != event.ActionID {
+		t.Fatalf("action ID = %q, want %q", got.ActionID, event.ActionID)
+	}
+	if got.ProfileID != event.ProfileID {
+		t.Fatalf("profile ID = %q, want %q", got.ProfileID, event.ProfileID)
+	}
+}
