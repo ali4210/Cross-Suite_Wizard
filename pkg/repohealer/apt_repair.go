@@ -25,7 +25,7 @@ exit ${PIPESTATUS[0]}
 
 func ApplyKnownAPTRepairs(exec Executor, result Result) RepairResult {
 	for _, finding := range result.Findings {
-		if finding.Code != "APT_KEYRING_PATH_MISSING" {
+		if !IsKnownAPTRepairFinding(finding.Code) {
 			continue
 		}
 

@@ -454,3 +454,47 @@ func TestApplyKnownAPTRepairsBlocksBeforeSnapshotWhenAPTDpkgLockIsActive(t *test
 		t.Fatalf("lock probe must never remove locks or kill processes:\n%s", lockProbe)
 	}
 }
+
+func TestApplyKnownAPTRepairsAppliesDockerBindingMismatch(t *testing.T) {
+	exec := &fakeExecutor{
+		runSudoOutputs: []string{
+			"",
+		},
+		runSudoLabelOutputs: []string{
+			"REPAIR_APPLIED|docker-ce|fingerprint=9DC858229FC7DD38854AE2D88D81803C0EBFCD88",
+		},
+	}
+
+	result := dockerRepairResult()
+	result.Findings[0].Code = "APT_SOURCE_KEYRING_MISMATCH"
+
+	got := ApplyKnownAPTRepairs(exec, result)
+
+	if !got.Attempted {
+		t.Fatal("known Docker source/keyring mismatch must attempt repair")
+	}
+	if !got.Applied {
+		t.Fatalf("known Docker source/keyring mismatch must apply: %v", got.Error)
+	}
+	if got.RolledBack {
+		t.Fatal("successful Docker source/keyring mismatch must not roll back")
+	}
+	if got.Error != nil {
+		t.Fatalf("successful Docker source/keyring mismatch returned error: %v", got.Error)
+	}
+	if got.ProfileID != "docker-ce" {
+		t.Fatalf("profile ID = %q, want docker-ce", got.ProfileID)
+	}
+	if len(exec.commands) != 4 {
+		t.Fatalf(
+			"expected lock probe, snapshot, repair, verification; got %d commands",
+			len(exec.commands),
+		)
+	}
+	if !strings.Contains(exec.commands[0], "Checking APT/Dpkg Lock State") {
+		t.Fatalf("first command must check APT/dpkg lock state:\n%s", exec.commands[0])
+	}
+	if !strings.Contains(exec.commands[2], `PROFILE_ID="docker-ce"`) {
+		t.Fatalf("repair command does not target Docker:\n%s", exec.commands[2])
+	}
+}
