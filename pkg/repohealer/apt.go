@@ -66,6 +66,15 @@ grep -RIn --include='*.list' --include='*.sources' \
   -E 'signed-by|Signed-By' \
   /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null
 
+echo '=== DEB822_SOURCES ==='
+find /etc/apt/sources.list.d -maxdepth 1 -type f -name '*.sources' -print0 2>/dev/null \
+  | while IFS= read -r -d '' source_file; do
+      printf '%s\n' '--- DEB822_FILE_BEGIN ---'
+      printf '%s\n' "$source_file"
+      cat "$source_file"
+      printf '%s\n' '--- DEB822_FILE_END ---'
+    done
+
 echo '=== KEYRINGS ==='
 find /etc/apt/keyrings /etc/apt/trusted.gpg.d \
   -maxdepth 1 -type f -printf '%p\t%m\t%u:%g\n' 2>/dev/null
@@ -111,44 +120,27 @@ exit ${PIPESTATUS[0]}
 		})
 	}
 
-	for _, inventoryLine := range strings.Split(inventory, "\n") {
-		reference, ok := ParseAPTListSourceReference(inventoryLine)
-		if !ok {
-			continue
-		}
-
+	handleReference := func(reference APTSourceReference) {
 		sourceFile := reference.SourceFile
 		lineNumber := reference.LineNumber
 		keyringPath := reference.KeyringPath
 
 		dedupKey := fmt.Sprintf("%s:%d:%s", sourceFile, lineNumber, keyringPath)
 		if sourceFile == "" || keyringPath == "" || seenMissingKeyrings[dedupKey] {
-			continue
+			return
 		}
-
 		seenMissingKeyrings[dedupKey] = true
 
 		keyringCheck := fmt.Sprintf(`[ -r %q ] && echo PRESENT || echo MISSING`, keyringPath)
 		keyringOutput := runSudo(keyringCheck)
-
 		keyringMissing := strings.Contains(keyringOutput, "MISSING")
-		sourceLineOutput := ""
-		sourceLine := ""
-		repositoryURL := ""
-		repositoryName := ""
 
-		if keyringMissing {
-			sourceLineOutput = runSudo(fmt.Sprintf(`sed -n '%dp' %q 2>/dev/null`, lineNumber, sourceFile))
-			sourceLine = strings.TrimSpace(sourceLineOutput)
-			repositoryURL = extractRepositoryURL(sourceLine)
-			repositoryName = repositoryNameFromURL(repositoryURL)
-		} else {
-			sourceLine = reference.SourceLine
-			repositoryURL = reference.RepositoryURL
-			repositoryName = repositoryNameFromURL(repositoryURL)
+		repositoryURL := reference.RepositoryURL
+		repositoryName := repositoryNameFromURL(repositoryURL)
 
+		if !keyringMissing {
 			profile, knownVendor := FindVendorProfile(ManagerAPT, repositoryURL)
-			if knownVendor && !HasExpectedAPTKeyringBinding(profile, sourceLine) {
+			if knownVendor && !HasExpectedAPTKeyringBinding(profile, reference.SourceLine) {
 				findings = append(findings, Finding{
 					Code:           "APT_SOURCE_KEYRING_MISMATCH",
 					Severity:       SeverityError,
@@ -172,8 +164,7 @@ exit ${PIPESTATUS[0]}
 					RequiresConsent: true,
 				})
 			}
-
-			continue
+			return
 		}
 
 		finding := Finding{
@@ -203,6 +194,28 @@ exit ${PIPESTATUS[0]}
 		}
 
 		findings = append(findings, finding)
+	}
+
+	for _, inventoryLine := range strings.Split(inventory, "\n") {
+		reference, ok := ParseAPTListSourceReference(inventoryLine)
+		if !ok {
+			continue
+		}
+		handleReference(reference)
+	}
+
+	for _, document := range ParseAPTDeb822Inventory(inventory) {
+		for _, stanza := range document.Stanzas {
+			reference, ok := ParseAPTDeb822SourceReference(
+				document.SourceFile,
+				stanza.StartLine,
+				stanza.Content,
+			)
+			if !ok {
+				continue
+			}
+			handleReference(reference)
+		}
 	}
 
 	lowerUpdate := strings.ToLower(updateOutput)
@@ -295,6 +308,88 @@ exit ${PIPESTATUS[0]}
 	}
 
 	return evidence, findings, actions
+}
+
+type APTDeb822InventoryDocument struct {
+	SourceFile string
+	Stanzas    []APTDeb822InventoryStanza
+}
+
+type APTDeb822InventoryStanza struct {
+	StartLine int
+	Content   string
+}
+
+func ParseAPTDeb822Inventory(inventory string) []APTDeb822InventoryDocument {
+	const beginMarker = "--- DEB822_FILE_BEGIN ---"
+	const endMarker = "--- DEB822_FILE_END ---"
+
+	var documents []APTDeb822InventoryDocument
+	lines := strings.Split(inventory, "\n")
+
+	for index := 0; index < len(lines); index++ {
+		if strings.TrimSpace(lines[index]) != beginMarker {
+			continue
+		}
+
+		index++
+		if index >= len(lines) {
+			break
+		}
+
+		sourceFile := strings.TrimSpace(lines[index])
+		if sourceFile == "" {
+			continue
+		}
+
+		var contentLines []string
+		for index++; index < len(lines); index++ {
+			if strings.TrimSpace(lines[index]) == endMarker {
+				break
+			}
+			contentLines = append(contentLines, lines[index])
+		}
+
+		stanzas := splitAPTDeb822Stanzas(strings.Join(contentLines, "\n"))
+		documents = append(documents, APTDeb822InventoryDocument{
+			SourceFile: sourceFile,
+			Stanzas:    stanzas,
+		})
+	}
+
+	return documents
+}
+
+func splitAPTDeb822Stanzas(content string) []APTDeb822InventoryStanza {
+	var stanzas []APTDeb822InventoryStanza
+	lines := strings.Split(content, "\n")
+
+	startLine := 1
+	var current []string
+
+	flush := func() {
+		stanza := strings.TrimSpace(strings.Join(current, "\n"))
+		if stanza == "" {
+			return
+		}
+		stanzas = append(stanzas, APTDeb822InventoryStanza{
+			StartLine: startLine,
+			Content:   stanza,
+		})
+	}
+
+	for lineIndex, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			flush()
+			current = nil
+			startLine = lineIndex + 2
+			continue
+		}
+		current = append(current, line)
+	}
+
+	flush()
+	return stanzas
 }
 
 func extractRepositoryURL(sourceLine string) string {

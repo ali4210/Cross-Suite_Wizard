@@ -13,7 +13,7 @@ func TestAPTAdapterDiagnoseFindsKnownDockerKeyringBindingMismatch(t *testing.T) 
 === SIGNED_BY_REFERENCES ===
 /etc/apt/sources.list.d/docker.list:1:deb [arch=amd64 signed-by=/etc/apt/keyrings/old-docker.gpg] https://download.docker.com/linux/debian bookworm stable
 === KEYRINGS ===
-/etc/apt/keyrings/old-docker.gpg	644	root:root
+/etc/apt/keyrings/old-docker.gpg        644     root:root
 `,
 			"",
 			"PRESENT\n",
@@ -98,7 +98,7 @@ func TestAPTAdapterDiagnoseDoesNotFlagMatchingDockerKeyringBinding(t *testing.T)
 			`=== SIGNED_BY_REFERENCES ===
 /etc/apt/sources.list.d/docker.list:1:deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian bookworm stable
 === KEYRINGS ===
-/etc/apt/keyrings/docker.gpg	644	root:root
+/etc/apt/keyrings/docker.gpg    644     root:root
 `,
 			"",
 			"PRESENT\n",
@@ -144,7 +144,6 @@ func TestAPTAdapterDiagnoseKeepsMissingDockerKeyringAsMissingFinding(t *testing.
 `,
 			"",
 			"MISSING\n",
-			"deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian bookworm stable\n",
 		},
 	}
 
@@ -197,13 +196,96 @@ func TestAPTAdapterDiagnoseKeepsMissingDockerKeyringAsMissingFinding(t *testing.
 		t.Fatal("known Docker missing keyring must require explicit approval")
 	}
 
-	if len(exec.commands) != 4 {
+	if len(exec.commands) != 3 {
 		t.Fatalf(
-			"expected inventory, apt update, keyring check, source-line read; got %d commands",
+			"expected inventory, apt update, and keyring check; got %d commands",
 			len(exec.commands),
 		)
 	}
-	if !strings.Contains(exec.commands[3], "sed -n '1p'") {
-		t.Fatalf("missing keyring path must read the source line; got:\n%s", exec.commands[3])
+	if strings.Contains(exec.commands[2], "sed -n") {
+		t.Fatalf("missing keyring path must use parsed source reference; got:\n%s", exec.commands[2])
+	}
+}
+
+func TestAPTAdapterDiagnoseFindsKnownDockerDeb822KeyringMismatch(t *testing.T) {
+	exec := &fakeExecutor{
+		runSudoOutputs: []string{
+			`=== DEB822_SOURCES ===
+--- DEB822_FILE_BEGIN ---
+/etc/apt/sources.list.d/docker.sources
+Types: deb
+URIs: https://download.docker.com/linux/debian
+Suites: bookworm
+Components: stable
+Architectures: amd64
+Signed-By: /etc/apt/keyrings/old-docker.gpg
+--- DEB822_FILE_END ---
+=== KEYRINGS ===
+/etc/apt/keyrings/old-docker.gpg        644     root:root
+`,
+			"",
+			"PRESENT\n",
+		},
+	}
+
+	adapter := APTAdapter{}
+	_, findings, _ := adapter.Diagnose(
+		exec,
+		TargetFacts{
+			Platform:       PlatformLinux,
+			Distribution:   "parrot",
+			Version:        "6.4",
+			Codename:       "lory",
+			Architecture:   "amd64",
+			PackageManager: ManagerAPT,
+		},
+		DefaultDiagnosticPolicy(),
+	)
+
+	var mismatch Finding
+	found := false
+	for _, finding := range findings {
+		if finding.Code == "APT_SOURCE_KEYRING_MISMATCH" &&
+			finding.SourceFile == "/etc/apt/sources.list.d/docker.sources" {
+			mismatch = finding
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Fatalf("expected Deb822 Docker keyring mismatch; findings: %#v", findings)
+	}
+	if mismatch.RepositoryName != "Docker CE" {
+		t.Fatalf("repository name = %q, want Docker CE", mismatch.RepositoryName)
+	}
+	if mismatch.RepositoryURL != "https://download.docker.com/linux/debian" {
+		t.Fatalf("repository URL = %q", mismatch.RepositoryURL)
+	}
+	if mismatch.SourceLine != 1 {
+		t.Fatalf("stanza start line = %d, want 1", mismatch.SourceLine)
+	}
+	if mismatch.Risk != RiskKnownVendor {
+		t.Fatalf("risk = %q, want %q", mismatch.Risk, RiskKnownVendor)
+	}
+	if !mismatch.AutoRepairable {
+		t.Fatal("known Deb822 Docker mismatch must be eligible after approval")
+	}
+	if !mismatch.RequiresConsent {
+		t.Fatal("known Deb822 Docker mismatch must require approval")
+	}
+
+	if len(exec.commands) != 3 {
+		t.Fatalf(
+			"expected inventory, apt update, and keyring check; got %d commands",
+			len(exec.commands),
+		)
+	}
+	if !strings.Contains(exec.commands[0], "DEB822_SOURCES") ||
+		!strings.Contains(exec.commands[0], "--- DEB822_FILE_BEGIN ---") {
+		t.Fatalf(
+			"inventory command must collect complete Deb822 source files:\n%s",
+			exec.commands[0],
+		)
 	}
 }
