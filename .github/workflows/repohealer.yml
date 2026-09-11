@@ -1,0 +1,61 @@
+name: Repo Healer Quality Gate
+
+on:
+  pull_request:
+    paths:
+      - 'pkg/repohealer/**'
+      - 'pkg/playbook/**'
+      - '.github/workflows/repohealer.yml'
+      - 'docs/**'
+      - 'go.mod'
+      - 'go.sum'
+  push:
+    branches:
+      - main
+    paths:
+      - 'pkg/repohealer/**'
+      - 'pkg/playbook/**'
+      - '.github/workflows/repohealer.yml'
+      - 'docs/**'
+      - 'go.mod'
+      - 'go.sum'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repohealer:
+    name: Repo Healer and Playbook
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Verify module metadata
+        run: |
+          go mod download
+          go mod verify
+
+      - name: Test Repo Healer
+        run: go test -count=1 ./pkg/repohealer
+
+      - name: Test playbook boundaries
+        run: go test -count=1 ./pkg/playbook
+
+      - name: Vet Repo Healer and playbook
+        run: go vet ./pkg/repohealer ./pkg/playbook
+
+      - name: Race-test Repo Healer
+        run: go test -count=1 -race ./pkg/repohealer
+
+      - name: Race-test playbook
+        run: go test -count=1 -race ./pkg/playbook
