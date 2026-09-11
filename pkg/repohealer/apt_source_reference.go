@@ -18,6 +18,18 @@ var aptSignedByPattern = regexp.MustCompile(
 	`(?i)\bsigned-by\s*=\s*([^\s\]]+)`,
 )
 
+var deb822SignedByPattern = regexp.MustCompile(
+	`(?im)^signed-by:\s*([^\s#]+)\s*$`,
+)
+
+var deb822URIPattern = regexp.MustCompile(
+	`(?im)^uris:\s*(https?://[^\s]+)\s*$`,
+)
+
+var aptRepositoryURLPattern = regexp.MustCompile(
+	`^https?://[^\s\]]+$`,
+)
+
 func ParseAPTListSourceReference(line string) (APTSourceReference, bool) {
 	trimmed := strings.TrimSpace(line)
 
@@ -56,7 +68,7 @@ func ParseAPTListSourceReference(line string) (APTSourceReference, bool) {
 	repositoryURL := extractRepositoryURL(sourceLine)
 
 	if sourceFile == "" || sourceLine == "" ||
-		keyringPath == "" || repositoryURL == "" {
+		keyringPath == "" || !isValidAPTRepositoryURL(repositoryURL) {
 		return APTSourceReference{}, false
 	}
 
@@ -67,4 +79,56 @@ func ParseAPTListSourceReference(line string) (APTSourceReference, bool) {
 		RepositoryURL: repositoryURL,
 		KeyringPath:   keyringPath,
 	}, true
+}
+
+func ParseAPTDeb822SourceReference(
+	sourceFile string,
+	stanzaStartLine int,
+	stanza string,
+) (APTSourceReference, bool) {
+	sourceFile = strings.TrimSpace(sourceFile)
+	stanza = strings.TrimSpace(stanza)
+
+	if sourceFile == "" || stanzaStartLine < 1 || stanza == "" {
+		return APTSourceReference{}, false
+	}
+
+	signedByMatch := deb822SignedByPattern.FindStringSubmatch(stanza)
+	if len(signedByMatch) != 2 {
+		return APTSourceReference{}, false
+	}
+
+	uriMatch := deb822URIPattern.FindStringSubmatch(stanza)
+	if len(uriMatch) != 2 {
+		return APTSourceReference{}, false
+	}
+
+	keyringPath := strings.TrimSpace(signedByMatch[1])
+	repositoryURL := strings.TrimSpace(uriMatch[1])
+
+	if keyringPath == "" || !isValidAPTRepositoryURL(repositoryURL) {
+		return APTSourceReference{}, false
+	}
+
+	return APTSourceReference{
+		SourceFile:    sourceFile,
+		LineNumber:    stanzaStartLine,
+		SourceLine:    stanza,
+		RepositoryURL: repositoryURL,
+		KeyringPath:   keyringPath,
+	}, true
+}
+
+func isValidAPTRepositoryURL(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	if strings.Contains(value, "[") ||
+		strings.Contains(value, "]") ||
+		strings.Contains(value, "(") ||
+		strings.Contains(value, ")") {
+		return false
+	}
+	return aptRepositoryURLPattern.MatchString(value)
 }
