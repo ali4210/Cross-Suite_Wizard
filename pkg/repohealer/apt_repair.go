@@ -24,17 +24,25 @@ exit ${PIPESTATUS[0]}
 `
 
 func ApplyKnownAPTRepairs(exec Executor, result Result) RepairResult {
-	for _, finding := range result.Findings {
-		if !IsKnownAPTRepairFinding(finding.Code) {
+	actions := BuildRepairPlan(result)
+
+	for _, action := range actions {
+		if !action.Eligible || !IsKnownAPTRepairFinding(action.FindingCode) {
 			continue
 		}
 
-		profile, ok := FindVendorProfile(ManagerAPT, finding.RepositoryURL)
-		if !ok {
+		profile, ok := FindVendorProfile(ManagerAPT, action.RepositoryURL)
+		if !ok || profile.ID != action.ProfileID {
 			continue
 		}
 
-		return applyKnownAPTProfileRepair(exec, result.Target, profile)
+		return applyKnownAPTRepairActionWithVerification(
+			exec,
+			result.Target,
+			profile,
+			action,
+			defaultAPTVerificationScript,
+		)
 	}
 
 	return RepairResult{
@@ -48,10 +56,26 @@ func applyKnownAPTProfileRepair(
 	facts TargetFacts,
 	profile VendorProfile,
 ) RepairResult {
-	return applyKnownAPTProfileRepairWithVerification(
+	action := RepairAction{
+		ID:            APTRepairActionID(profile.ID, "APT_KEYRING_PATH_MISSING"),
+		FindingCode:   "APT_KEYRING_PATH_MISSING",
+		Eligible:      true,
+		ProfileID:     profile.ID,
+		RepositoryURL: profile.AllowedURLPrefixes[0],
+		SourceFile:    profile.SourceFile,
+		SourceFormat:  SourceFormatAPTList,
+		KeyringPath:   profile.KeyringPath,
+		SnapshotTargets: []string{
+			profile.SourceFile,
+			profile.KeyringPath,
+		},
+	}
+
+	return applyKnownAPTRepairActionWithVerification(
 		exec,
 		facts,
 		profile,
+		action,
 		defaultAPTVerificationScript,
 	)
 }
@@ -62,24 +86,44 @@ func applyKnownAPTProfileRepairWithVerification(
 	profile VendorProfile,
 	verificationScript string,
 ) RepairResult {
+	action := RepairAction{
+		ID:            APTRepairActionID(profile.ID, "APT_KEYRING_PATH_MISSING"),
+		FindingCode:   "APT_KEYRING_PATH_MISSING",
+		Eligible:      true,
+		ProfileID:     profile.ID,
+		RepositoryURL: profile.AllowedURLPrefixes[0],
+		SourceFile:    profile.SourceFile,
+		SourceFormat:  SourceFormatAPTList,
+		KeyringPath:   profile.KeyringPath,
+		SnapshotTargets: []string{
+			profile.SourceFile,
+			profile.KeyringPath,
+		},
+	}
+
+	return applyKnownAPTRepairActionWithVerification(
+		exec,
+		facts,
+		profile,
+		action,
+		verificationScript,
+	)
+}
+
+func applyKnownAPTRepairActionWithVerification(
+	exec Executor,
+	facts TargetFacts,
+	profile VendorProfile,
+	action RepairAction,
+	verificationScript string,
+) RepairResult {
 	repairResult := RepairResult{
 		Attempted: true,
 		ProfileID: profile.ID,
 	}
 
-	if profile.PackageManager != ManagerAPT {
-		repairResult.Error = fmt.Errorf(
-			"repair blocked: profile %q is not an APT profile",
-			profile.ID,
-		)
-		return repairResult
-	}
-
-	if len(profile.ExpectedFingerprints) == 0 {
-		repairResult.Error = fmt.Errorf(
-			"repair blocked: %s has no pinned signing-key fingerprint",
-			profile.ID,
-		)
+	if err := validateAPTRepairAction(profile, action); err != nil {
+		repairResult.Error = err
 		return repairResult
 	}
 
@@ -104,7 +148,7 @@ func applyKnownAPTProfileRepairWithVerification(
 	}
 
 	snapshotTargets := []string{
-		profile.SourceFile,
+		action.SourceFile,
 		profile.KeyringPath,
 	}
 
@@ -213,7 +257,7 @@ echo "REPAIR_APPLIED|$PROFILE_ID|fingerprint=$MATCHED_FINGERPRINT"
 		profile.ID,
 		profile.KeyURL,
 		profile.KeyringPath,
-		profile.SourceFile,
+		action.SourceFile,
 		sourceLine,
 		tempDir,
 		shellArray(profile.ExpectedFingerprints),
@@ -282,6 +326,63 @@ echo "REPAIR_APPLIED|$PROFILE_ID|fingerprint=$MATCHED_FINGERPRINT"
 
 	repairResult.Applied = true
 	return repairResult
+}
+
+func validateAPTRepairAction(profile VendorProfile, action RepairAction) error {
+	if profile.PackageManager != ManagerAPT {
+		return fmt.Errorf(
+			"repair blocked: profile %q is not an APT profile",
+			profile.ID,
+		)
+	}
+	if len(profile.ExpectedFingerprints) == 0 {
+		return fmt.Errorf(
+			"repair blocked: %s has no pinned signing-key fingerprint",
+			profile.ID,
+		)
+	}
+	if !action.Eligible {
+		return fmt.Errorf(
+			"repair blocked: action %q is not eligible",
+			action.ID,
+		)
+	}
+	if action.ProfileID != profile.ID {
+		return fmt.Errorf(
+			"repair blocked: action profile %q does not match verified profile %q",
+			action.ProfileID,
+			profile.ID,
+		)
+	}
+	if !IsKnownAPTRepairFinding(action.FindingCode) {
+		return fmt.Errorf(
+			"repair blocked: action %q has unsupported APT finding code %q",
+			action.ID,
+			action.FindingCode,
+		)
+	}
+	if action.SourceFormat != SourceFormatAPTList {
+		return fmt.Errorf(
+			"repair blocked: APT source format %q is not supported for execution",
+			action.SourceFormat,
+		)
+	}
+	if action.SourceFile == "" || action.SourceFile != profile.SourceFile {
+		return fmt.Errorf(
+			"repair blocked: approved APT source file %q does not match verified profile source file %q",
+			action.SourceFile,
+			profile.SourceFile,
+		)
+	}
+	if action.KeyringPath == "" || action.KeyringPath != profile.KeyringPath {
+		return fmt.Errorf(
+			"repair blocked: approved APT keyring path %q does not match verified profile keyring path %q",
+			action.KeyringPath,
+			profile.KeyringPath,
+		)
+	}
+
+	return nil
 }
 
 func ensureAPTRepairUnlocked(exec Executor) error {

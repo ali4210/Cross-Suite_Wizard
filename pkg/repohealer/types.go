@@ -109,6 +109,7 @@ type RepairAction struct {
 	ExpectedFingerprints []string     `json:"expected_fingerprints,omitempty"`
 	KeyringPath          string       `json:"keyring_path,omitempty"`
 	SourceFile           string       `json:"source_file,omitempty"`
+	SourceLine           int          `json:"source_line,omitempty"`
 	SourceFormat         SourceFormat `json:"source_format,omitempty"`
 	RenderedSource       string       `json:"rendered_source,omitempty"`
 	SnapshotTargets      []string     `json:"snapshot_targets,omitempty"`

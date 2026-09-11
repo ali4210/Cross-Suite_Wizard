@@ -93,7 +93,10 @@ func ApproveAndApplyAPTRepair(
 	findingMatched := false
 	for _, finding := range result.Findings {
 		if finding.Code == selected.FindingCode &&
-			finding.RepositoryURL == selected.RepositoryURL {
+			finding.RepositoryURL == selected.RepositoryURL &&
+			finding.SourceFile == selected.SourceFile &&
+			finding.SourceLine == selected.SourceLine &&
+			finding.SourceFormat == selected.SourceFormat {
 			findingMatched = true
 			break
 		}
@@ -110,7 +113,13 @@ func ApproveAndApplyAPTRepair(
 		}
 	}
 
-	repairResult := applyKnownAPTProfileRepair(exec, result.Target, profile)
+	repairResult := applyKnownAPTRepairActionWithVerification(
+		exec,
+		result.Target,
+		profile,
+		selected,
+		defaultAPTVerificationScript,
+	)
 
 	return ApprovalExecutionResult{
 		Decision:     ApprovalExecutionExecuted,

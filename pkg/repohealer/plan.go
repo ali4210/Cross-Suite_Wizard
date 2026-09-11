@@ -38,7 +38,8 @@ func BuildRepairPlan(result Result) []RepairAction {
 			KeyURL:               profile.KeyURL,
 			ExpectedFingerprints: append([]string(nil), profile.ExpectedFingerprints...),
 			KeyringPath:          profile.KeyringPath,
-			SourceFile:           profile.SourceFile,
+			SourceFile:           finding.SourceFile,
+			SourceLine:           finding.SourceLine,
 			SourceFormat:         finding.SourceFormat,
 			SnapshotTargets: []string{
 				profile.SourceFile,

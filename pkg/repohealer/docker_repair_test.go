@@ -20,6 +20,9 @@ func dockerRepairResult() Result {
 			{
 				Code:          "APT_KEYRING_PATH_MISSING",
 				RepositoryURL: "https://download.docker.com/linux/debian",
+				SourceFile:    "/etc/apt/sources.list.d/docker.list",
+				SourceLine:    1,
+				SourceFormat:  SourceFormatAPTList,
 			},
 		},
 	}
@@ -110,20 +113,23 @@ func TestApplyKnownAPTRepairsRejectsDockerForUnsupportedSuite(t *testing.T) {
 
 	got := ApplyKnownAPTRepairs(exec, result)
 
-	if !got.Attempted {
-		t.Fatal("expected a matched Docker repair attempt")
+	if got.Attempted {
+		t.Fatal("unsupported Docker suite must be blocked before a repair attempt")
 	}
 	if got.Applied {
 		t.Fatal("unsupported Docker suite must not be repaired")
 	}
 	if got.RolledBack {
-		t.Fatal("no snapshot/rollback should run when source rendering is blocked")
+		t.Fatal("unsupported Docker suite must not create a snapshot or roll back")
 	}
 	if got.Error == nil {
 		t.Fatal("unsupported Docker suite must return an error")
 	}
 	if len(exec.commands) != 0 {
-		t.Fatalf("unsupported Docker suite must not execute commands, got %d", len(exec.commands))
+		t.Fatalf(
+			"unsupported Docker suite must not execute commands, got %d",
+			len(exec.commands),
+		)
 	}
 }
 

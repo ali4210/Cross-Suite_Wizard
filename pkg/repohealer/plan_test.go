@@ -19,6 +19,9 @@ func dockerPlanResult() Result {
 			{
 				Code:          "APT_KEYRING_PATH_MISSING",
 				RepositoryURL: "https://download.docker.com/linux/debian",
+				SourceFile:    "/etc/apt/sources.list.d/docker.list",
+				SourceLine:    1,
+				SourceFormat:  SourceFormatAPTList,
 			},
 		},
 	}
@@ -38,6 +41,9 @@ func TestBuildRepairPlanForMicrosoftVSCode(t *testing.T) {
 			{
 				Code:          "APT_KEYRING_PATH_MISSING",
 				RepositoryURL: "https://packages.microsoft.com/repos/code",
+				SourceFile:    "/etc/apt/sources.list.d/vscode.list",
+				SourceLine:    1,
+				SourceFormat:  SourceFormatAPTList,
 			},
 		},
 	}

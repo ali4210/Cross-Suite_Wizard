@@ -93,6 +93,9 @@ func microsoftRepairResult() Result {
 			{
 				Code:          "APT_KEYRING_PATH_MISSING",
 				RepositoryURL: "https://packages.microsoft.com/repos/code",
+				SourceFile:    "/etc/apt/sources.list.d/vscode.list",
+				SourceLine:    1,
+				SourceFormat:  SourceFormatAPTList,
 			},
 		},
 	}
