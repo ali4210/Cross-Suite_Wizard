@@ -7,11 +7,25 @@ import (
 	"time"
 )
 
-func CreateAPTFileSnapshot(exec Executor, files []string) (Snapshot, error) {
-	now := time.Now().UTC()
-	id := "apt-" + now.Format("20060102T150405Z")
-	path := "/var/lib/cross-suite/snapshots/" + id
+const defaultAPTSnapshotRoot = "/var/lib/cross-suite/snapshots"
 
+func CreateAPTFileSnapshot(exec Executor, files []string) (Snapshot, error) {
+	return createAPTFileSnapshotAtRoot(
+		exec,
+		files,
+		defaultAPTSnapshotRoot,
+		time.Now().UTC(),
+	)
+}
+
+func createAPTFileSnapshotAtRoot(
+	exec Executor,
+	files []string,
+	snapshotRoot string,
+	now time.Time,
+) (Snapshot, error) {
+	id := "apt-" + now.Format("20060102T150405Z")
+	path := strings.TrimRight(snapshotRoot, "/") + "/" + id
 	targets := shellArray(files)
 
 	script := fmt.Sprintf(`
@@ -40,6 +54,7 @@ for target in "${TARGETS[@]}"; do
 
 	if [ -e "$target" ]; then
 		printf 'present\n' > "$metadata"
+		stat -c '%%a' "$target" >> "$metadata"
 		cp -a "$target" "$content"
 	else
 		printf 'absent\n' > "$metadata"
@@ -90,11 +105,25 @@ chmod 0600 "$SNAPSHOT_DIR/checksums.sha256"
 }
 
 func RestoreAPTFileSnapshot(exec Executor, snapshot Snapshot, files []string) error {
+	return restoreAPTFileSnapshot(exec, snapshot, files, true)
+}
+
+func restoreAPTFileSnapshot(
+	exec Executor,
+	snapshot Snapshot,
+	files []string,
+	runAPTUpdate bool,
+) error {
 	if !snapshot.Created || snapshot.Path == "" {
 		return fmt.Errorf("cannot restore: no valid targeted APT snapshot is available")
 	}
 
 	targets := shellArray(files)
+	postRestoreVerification := ""
+	if runAPTUpdate {
+		postRestoreVerification = `
+apt-get update 2>&1 || true`
+	}
 
 	script := fmt.Sprintf(`
 set -eu
@@ -124,9 +153,15 @@ for target in "${TARGETS[@]}"; do
 		exit 31
 	fi
 
-	state="$(cat "$metadata")"
+	state="$(sed -n '1p' "$metadata")"
 
 	if [ "$state" = "present" ]; then
+		mode="$(sed -n '2p' "$metadata")"
+		if ! printf '%%s\n' "$mode" | grep -Eq '^[0-7]{3,4}$'; then
+			echo "ROLLBACK_ERROR|invalid_snapshot_mode|$target|$mode"
+			exit 34
+		fi
+
 		if [ ! -f "$content" ]; then
 			echo "ROLLBACK_ERROR|missing_snapshot_content|$target"
 			exit 33
@@ -134,6 +169,7 @@ for target in "${TARGETS[@]}"; do
 
 		mkdir -p "$(dirname "$target")"
 		cp -a "$content" "$target"
+		chmod "$mode" "$target"
 	elif [ "$state" = "absent" ]; then
 		rm -f "$target"
 	else
@@ -141,11 +177,11 @@ for target in "${TARGETS[@]}"; do
 		exit 32
 	fi
 done
-
-apt-get update 2>&1 || true
+%s
 `,
 		shellQuote(snapshot.Path),
 		targets,
+		postRestoreVerification,
 	)
 
 	_, err := exec.RunSudo(script)
