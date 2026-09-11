@@ -2,6 +2,7 @@ package playbook
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -243,10 +244,33 @@ func runSelectedDeb822RepairExecutionFlow(
 
 	fmt.Println("\n" + repohealer.FormatDeb822RepairApprovalResult(execution))
 
+	auditPath := repohealer.Deb822RepairAuditPath()
 	audit := repohealer.BuildDeb822RepairAuditEvent(execution, time.Now())
-	fmt.Printf(
-		Cyan+"Audit event: status=%s failure_category=%s\n"+Reset,
-		audit.Status,
-		audit.FailureCategory,
-	)
+
+	if err := appendDeb822RepairAudit(auditPath, audit); err != nil {
+		fmt.Fprintf(
+			os.Stderr,
+			Yellow+
+				"WARNING: Deb822 repair outcome was completed, but its audit event could not be persisted to %q: %v\n"+
+				Reset,
+			auditPath,
+			err,
+		)
+	} else {
+		fmt.Printf(
+			Cyan+
+				"Audit record written: %s (status=%s failure_category=%s)\n"+
+				Reset,
+			auditPath,
+			audit.Status,
+			audit.FailureCategory,
+		)
+	}
+}
+
+func appendDeb822RepairAudit(
+	auditPath string,
+	audit repohealer.Deb822RepairAuditEvent,
+) error {
+	return repohealer.AppendDeb822RepairAuditEvent(auditPath, audit)
 }

@@ -1,8 +1,13 @@
 package playbook
 
 import (
+	"bytes"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"cross-ssh/pkg/repohealer"
 )
@@ -181,5 +186,61 @@ func TestPrepareSelectedDeb822RepairExecutionRejectsUnsafeInputs(t *testing.T) {
 				)
 			}
 		})
+	}
+}
+
+func TestAppendDeb822RepairAuditWritesBlockedDecision(t *testing.T) {
+	auditPath := filepath.Join(
+		t.TempDir(),
+		"state",
+		"cross-suite",
+		"repohealer-deb822-audit.jsonl",
+	)
+
+	audit := repohealer.BuildDeb822RepairAuditEvent(
+		repohealer.Deb822RepairApprovalResult{
+			Status:      repohealer.Deb822RepairApprovalStatusBlocked,
+			ActionID:    "apt-source-binding-repair-docker-ce",
+			ProfileID:   "docker-ce",
+			SourceFile:  "/etc/apt/sources.list.d/docker.sources",
+			KeyringPath: "/etc/apt/keyrings/docker.gpg",
+			Reason:      "SECRET_POLICY_REASON_DO_NOT_LOG",
+		},
+		time.Date(2026, time.September, 12, 0, 0, 0, 0, time.UTC),
+	)
+
+	if err := appendDeb822RepairAudit(auditPath, audit); err != nil {
+		t.Fatalf("appendDeb822RepairAudit() error = %v", err)
+	}
+
+	content, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatalf("os.ReadFile() error = %v", err)
+	}
+
+	var event repohealer.Deb822RepairAuditEvent
+	if err := json.Unmarshal(bytes.TrimSpace(content), &event); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	if event.Status != repohealer.Deb822RepairApprovalStatusBlocked {
+		t.Fatalf(
+			"status = %q, want %q",
+			event.Status,
+			repohealer.Deb822RepairApprovalStatusBlocked,
+		)
+	}
+	if event.FailureCategory != repohealer.RepairFailureBlocked {
+		t.Fatalf(
+			"failure category = %q, want %q",
+			event.FailureCategory,
+			repohealer.RepairFailureBlocked,
+		)
+	}
+	if strings.Contains(string(content), "SECRET_POLICY_REASON_DO_NOT_LOG") {
+		t.Fatalf(
+			"audit content must not contain raw reason: %s",
+			content,
+		)
 	}
 }

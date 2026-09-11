@@ -79,6 +79,40 @@ Disable the policy after the maintenance window:
 unset CROSS_SUITE_DEB822_REPAIR_ENABLED
 ```
 
+## Execution audit
+
+Repo Healer persists one redacted JSON Lines audit record for each completed Deb822 approval or execution outcome, including declined, blocked, applied, and failed results.
+
+Configure the operator-local audit path with:
+
+```bash
+export CROSS_SUITE_DEB822_AUDIT_PATH="$HOME/.local/state/cross-suite/repohealer-deb822-audit.jsonl"
+```
+
+If the variable is unset or blank, Repo Healer uses:
+
+```text
+/var/log/cross-suite/repohealer-deb822-audit.jsonl
+```
+
+For interactive development and ordinary user sessions, prefer a user-local path. The default `/var/log/cross-suite/` path generally requires a privileged or specially configured service account.
+
+On Unix, Repo Healer creates the audit directory with mode `0700` and creates the audit file with mode `0600`. The format is JSON Lines: one newline-terminated JSON object per completed decision or execution result.
+
+Audit records include the timestamp, result status, action/profile identifiers, approved source and keyring paths, attempt/applied/rollback state, snapshot metadata, and a controlled failure category.
+
+Audit records intentionally exclude raw command output, verification output, rendered source content, raw error or reason text, credentials, passwords, tokens, key material, and environment values.
+
+If the audit record cannot be written, Repo Healer prints a warning. Audit persistence failure does not change the completed repair result or trigger additional target-host activity.
+
+Inspect a user-local audit log with:
+
+```bash
+tail -n 20 "$CROSS_SUITE_DEB822_AUDIT_PATH"
+jq . "$CROSS_SUITE_DEB822_AUDIT_PATH"
+stat -c '%a %U:%G %n' "$CROSS_SUITE_DEB822_AUDIT_PATH"
+```
+
 ## Operator procedure
 
 1. Run Repo Healer diagnosis for the target.
