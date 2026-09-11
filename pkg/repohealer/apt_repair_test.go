@@ -15,6 +15,9 @@ type fakeExecutor struct {
 	runSudoErrors      []error
 	runSudoLabelErrors []error
 
+	lockProbeOutput string
+	lockProbeError  error
+
 	commands []string
 }
 
@@ -56,6 +59,10 @@ func (f *fakeExecutor) RunSudo(script string) (string, error) {
 
 func (f *fakeExecutor) RunSudoWithLabel(script, label string) (string, error) {
 	f.commands = append(f.commands, "SUDO_LABEL["+label+"]: "+script)
+
+	if label == "Checking APT/Dpkg Lock State" {
+		return f.lockProbeOutput, f.lockProbeError
+	}
 
 	output := ""
 	if len(f.runSudoLabelOutputs) > 0 {
@@ -158,12 +165,19 @@ func TestApplyKnownAPTRepairsRollsBackOnFingerprintMismatch(t *testing.T) {
 	if got.Snapshot.Path == "" {
 		t.Fatal("expected snapshot metadata before repair attempt")
 	}
-	if len(exec.commands) < 3 {
-		t.Fatalf("expected snapshot, repair, and rollback commands; got %d", len(exec.commands))
+	if len(exec.commands) < 4 {
+		t.Fatalf(
+			"expected lock probe, snapshot, repair, and rollback commands; got %d",
+			len(exec.commands),
+		)
 	}
-	if !strings.Contains(exec.commands[0], "SUDO:") {
-		t.Fatalf("first command must create snapshot: %s", exec.commands[0])
+	if !strings.Contains(exec.commands[0], "Checking APT/Dpkg Lock State") {
+		t.Fatalf("first command must check APT/dpkg lock state: %s", exec.commands[0])
 	}
+	if !strings.Contains(exec.commands[1], "SUDO:") {
+		t.Fatalf("second command must create snapshot: %s", exec.commands[1])
+	}
+
 	profile, ok := FindVendorProfile(
 		ManagerAPT,
 		"https://packages.microsoft.com/repos/code",
@@ -173,11 +187,11 @@ func TestApplyKnownAPTRepairsRollsBackOnFingerprintMismatch(t *testing.T) {
 	}
 
 	expectedLabel := "Restoring " + profile.DisplayName + " APT Trust"
-	if !strings.Contains(exec.commands[1], expectedLabel) {
+	if !strings.Contains(exec.commands[2], expectedLabel) {
 		t.Fatalf(
-			"second command must use the profile repair label %q: %s",
+			"third command must use the profile repair label %q: %s",
 			expectedLabel,
-			exec.commands[1],
+			exec.commands[2],
 		)
 	}
 	if !strings.Contains(exec.commands[len(exec.commands)-1], "SUDO:") {
@@ -218,11 +232,17 @@ func TestApplyKnownAPTRepairsRollsBackOnAPTVerificationFailure(t *testing.T) {
 	if !strings.Contains(got.VerificationOut, "NO_PUBKEY EB3E94ADBE1229CF") {
 		t.Fatalf("expected verification evidence, got: %s", got.VerificationOut)
 	}
-	if len(exec.commands) < 4 {
-		t.Fatalf("expected snapshot, repair, verification, rollback; got %d", len(exec.commands))
+	if len(exec.commands) < 5 {
+		t.Fatalf(
+			"expected lock probe, snapshot, repair, verification, rollback; got %d",
+			len(exec.commands),
+		)
 	}
-	if !strings.Contains(exec.commands[2], "Verifying APT Repository Health") {
-		t.Fatalf("third command must be verification: %s", exec.commands[2])
+	if !strings.Contains(exec.commands[0], "Checking APT/Dpkg Lock State") {
+		t.Fatalf("first command must check APT/dpkg lock state: %s", exec.commands[0])
+	}
+	if !strings.Contains(exec.commands[3], "Verifying APT Repository Health") {
+		t.Fatalf("fourth command must be verification: %s", exec.commands[3])
 	}
 	if !strings.Contains(exec.commands[len(exec.commands)-1], "SUDO:") {
 		t.Fatalf("last command must be rollback: %s", exec.commands[len(exec.commands)-1])
@@ -240,6 +260,7 @@ func TestDockerRepairUsesAllPinnedFingerprints(t *testing.T) {
 
 	exec := &fakeExecutor{
 		runSudoOutputs: []string{
+			"",
 			"",
 		},
 		runSudoLabelOutputs: []string{
@@ -276,11 +297,17 @@ func TestDockerRepairUsesAllPinnedFingerprints(t *testing.T) {
 		t.Fatalf("profile ID = %q, want docker-ce", got.ProfileID)
 	}
 
-	if len(exec.commands) < 2 {
-		t.Fatalf("expected snapshot and repair commands, got %d", len(exec.commands))
+	if len(exec.commands) < 4 {
+		t.Fatalf(
+			"expected lock probe, snapshot, repair, and rollback commands; got %d",
+			len(exec.commands),
+		)
+	}
+	if !strings.Contains(exec.commands[0], "Checking APT/Dpkg Lock State") {
+		t.Fatalf("first command must check APT/dpkg lock state: %s", exec.commands[0])
 	}
 
-	repairCommand := exec.commands[1]
+	repairCommand := exec.commands[2]
 	for _, fingerprint := range profile.ExpectedFingerprints {
 		if !strings.Contains(repairCommand, fingerprint) {
 			t.Fatalf(
@@ -343,14 +370,17 @@ exit 42
 		t.Fatalf("verification output = %q, want injected verifier output", got.VerificationOut)
 	}
 
-	if len(exec.commands) != 4 {
+	if len(exec.commands) != 5 {
 		t.Fatalf(
-			"expected snapshot, repair, verification, rollback; got %d commands",
+			"expected lock probe, snapshot, repair, verification, rollback; got %d commands",
 			len(exec.commands),
 		)
 	}
+	if !strings.Contains(exec.commands[0], "Checking APT/Dpkg Lock State") {
+		t.Fatalf("first command must check APT/dpkg lock state: %s", exec.commands[0])
+	}
 
-	verificationCommand := exec.commands[2]
+	verificationCommand := exec.commands[3]
 	if !strings.Contains(verificationCommand, "Verifying APT Repository Health") {
 		t.Fatalf("expected verification label, got:\n%s", verificationCommand)
 	}
@@ -367,8 +397,60 @@ exit 42
 		)
 	}
 
-	rollbackCommand := exec.commands[3]
+	rollbackCommand := exec.commands[4]
 	if !strings.Contains(rollbackCommand, "SUDO:") {
 		t.Fatalf("last command must perform rollback, got:\n%s", rollbackCommand)
+	}
+}
+
+func TestApplyKnownAPTRepairsBlocksBeforeSnapshotWhenAPTDpkgLockIsActive(t *testing.T) {
+	exec := &fakeExecutor{
+		lockProbeOutput: "APT_LOCK_ACTIVE|owners=12345",
+		lockProbeError:  errors.New("exit status 20"),
+	}
+
+	got := ApplyKnownAPTRepairs(exec, microsoftRepairResult())
+
+	if !got.Attempted {
+		t.Fatal("expected known Microsoft repair to be considered attempted")
+	}
+	if got.Applied {
+		t.Fatal("active APT/dpkg lock must prevent repair application")
+	}
+	if got.RolledBack {
+		t.Fatal("active APT/dpkg lock must not create a snapshot or trigger rollback")
+	}
+	if got.Snapshot.Created || got.Snapshot.Path != "" {
+		t.Fatalf("active lock must block before snapshot creation, got snapshot: %+v", got.Snapshot)
+	}
+	if got.Error == nil {
+		t.Fatal("active APT/dpkg lock must return a blocking error")
+	}
+	if !strings.Contains(got.Error.Error(), "APT/dpkg package-manager lock is active") {
+		t.Fatalf("unexpected lock error: %v", got.Error)
+	}
+
+	if len(exec.commands) != 1 {
+		t.Fatalf(
+			"expected only lock probe command, got %d commands: %v",
+			len(exec.commands),
+			exec.commands,
+		)
+	}
+
+	lockProbe := exec.commands[0]
+	if !strings.Contains(lockProbe, "Checking APT/Dpkg Lock State") {
+		t.Fatalf("expected APT/dpkg lock probe label, got:\n%s", lockProbe)
+	}
+	if !strings.Contains(lockProbe, "/var/lib/dpkg/lock-frontend") {
+		t.Fatalf("lock probe must check dpkg frontend lock:\n%s", lockProbe)
+	}
+	if !strings.Contains(lockProbe, "/var/lib/apt/lists/lock") {
+		t.Fatalf("lock probe must check APT lists lock:\n%s", lockProbe)
+	}
+	if strings.Contains(lockProbe, "rm -f") ||
+		strings.Contains(lockProbe, "kill ") ||
+		strings.Contains(lockProbe, "killall") {
+		t.Fatalf("lock probe must never remove locks or kill processes:\n%s", lockProbe)
 	}
 }

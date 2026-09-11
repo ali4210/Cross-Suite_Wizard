@@ -44,24 +44,30 @@ func TestApplyKnownAPTRepairsBuildsDockerRepairCommand(t *testing.T) {
 	if !got.Attempted {
 		t.Fatal("expected Docker repair to be attempted")
 	}
-
 	if got.ProfileID != "docker-ce" {
 		t.Fatalf("profile ID = %q, want docker-ce", got.ProfileID)
 	}
-
 	if got.Applied {
 		t.Fatal("fingerprint mismatch must prevent Docker repair application")
 	}
-
 	if !got.RolledBack {
 		t.Fatal("fingerprint mismatch must invoke targeted Docker rollback")
 	}
 
-	if len(exec.commands) < 3 {
-		t.Fatalf("expected snapshot, repair, and rollback commands; got %d", len(exec.commands))
+	if len(exec.commands) < 4 {
+		t.Fatalf(
+			"expected lock probe, snapshot, repair, and rollback commands; got %d",
+			len(exec.commands),
+		)
+	}
+	if !strings.Contains(exec.commands[0], "Checking APT/Dpkg Lock State") {
+		t.Fatalf("first command must check APT/dpkg lock state:\n%s", exec.commands[0])
+	}
+	if !strings.Contains(exec.commands[1], "SUDO:") {
+		t.Fatalf("second command must create snapshot:\n%s", exec.commands[1])
 	}
 
-	repairCommand := exec.commands[1]
+	repairCommand := exec.commands[2]
 
 	for _, expected := range []string{
 		`PROFILE_ID="docker-ce"`,
@@ -76,6 +82,10 @@ func TestApplyKnownAPTRepairsBuildsDockerRepairCommand(t *testing.T) {
 			t.Fatalf("Docker repair command missing expected content %q:\n%s", expected, repairCommand)
 		}
 	}
+
+	if !strings.Contains(exec.commands[len(exec.commands)-1], "SUDO:") {
+		t.Fatalf("last command must perform rollback:\n%s", exec.commands[len(exec.commands)-1])
+	}
 }
 
 func TestApplyKnownAPTRepairsRejectsDockerForUnsupportedSuite(t *testing.T) {
@@ -89,19 +99,15 @@ func TestApplyKnownAPTRepairsRejectsDockerForUnsupportedSuite(t *testing.T) {
 	if !got.Attempted {
 		t.Fatal("expected a matched Docker repair attempt")
 	}
-
 	if got.Applied {
 		t.Fatal("unsupported Docker suite must not be repaired")
 	}
-
 	if got.RolledBack {
 		t.Fatal("no snapshot/rollback should run when source rendering is blocked")
 	}
-
 	if got.Error == nil {
 		t.Fatal("unsupported Docker suite must return an error")
 	}
-
 	if len(exec.commands) != 0 {
 		t.Fatalf("unsupported Docker suite must not execute commands, got %d", len(exec.commands))
 	}
@@ -110,7 +116,6 @@ func TestApplyKnownAPTRepairsRejectsDockerForUnsupportedSuite(t *testing.T) {
 func TestApplyKnownAPTRepairsAppliesDockerRepairAfterVerification(t *testing.T) {
 	exec := &fakeExecutor{
 		runSudoOutputs: []string{
-			"",
 			"",
 		},
 		runSudoLabelOutputs: []string{
@@ -135,20 +140,24 @@ func TestApplyKnownAPTRepairsAppliesDockerRepairAfterVerification(t *testing.T) 
 	if got.ProfileID != "docker-ce" {
 		t.Fatalf("profile ID = %q, want docker-ce", got.ProfileID)
 	}
-	if len(exec.commands) != 3 {
+
+	if len(exec.commands) != 4 {
 		t.Fatalf(
-			"expected snapshot, repair, and verification commands; got %d",
+			"expected lock probe, snapshot, repair, and verification commands; got %d",
 			len(exec.commands),
 		)
 	}
-	if !strings.Contains(exec.commands[0], "SUDO:") {
-		t.Fatalf("first command must create snapshot: %s", exec.commands[0])
+	if !strings.Contains(exec.commands[0], "Checking APT/Dpkg Lock State") {
+		t.Fatalf("first command must check APT/dpkg lock state:\n%s", exec.commands[0])
 	}
-	if !strings.Contains(exec.commands[1], `PROFILE_ID="docker-ce"`) {
-		t.Fatalf("repair command does not target Docker:\n%s", exec.commands[1])
+	if !strings.Contains(exec.commands[1], "SUDO:") {
+		t.Fatalf("second command must create snapshot:\n%s", exec.commands[1])
 	}
-	if !strings.Contains(exec.commands[2], "apt-get update") {
-		t.Fatalf("final command must verify APT update:\n%s", exec.commands[2])
+	if !strings.Contains(exec.commands[2], `PROFILE_ID="docker-ce"`) {
+		t.Fatalf("repair command does not target Docker:\n%s", exec.commands[2])
+	}
+	if !strings.Contains(exec.commands[3], "apt-get update") {
+		t.Fatalf("final command must verify APT update:\n%s", exec.commands[3])
 	}
 }
 

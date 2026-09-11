@@ -17,6 +17,12 @@ type RepairResult struct {
 	Error           error
 }
 
+const defaultAPTVerificationScript = `
+set +e
+apt-get update 2>&1
+exit ${PIPESTATUS[0]}
+`
+
 func ApplyKnownAPTRepairs(exec Executor, result Result) RepairResult {
 	for _, finding := range result.Findings {
 		if finding.Code != "APT_KEYRING_PATH_MISSING" {
@@ -36,12 +42,6 @@ func ApplyKnownAPTRepairs(exec Executor, result Result) RepairResult {
 		Error:     fmt.Errorf("no eligible known-vendor APT repair was found"),
 	}
 }
-
-const defaultAPTVerificationScript = `
-set +e
-apt-get update 2>&1
-exit ${PIPESTATUS[0]}
-`
 
 func applyKnownAPTProfileRepair(
 	exec Executor,
@@ -95,6 +95,11 @@ func applyKnownAPTProfileRepairWithVerification(
 			profile.DisplayName,
 			err,
 		)
+		return repairResult
+	}
+
+	if err := ensureAPTRepairUnlocked(exec); err != nil {
+		repairResult.Error = err
 		return repairResult
 	}
 
@@ -243,4 +248,40 @@ echo "REPAIR_APPLIED|$PROFILE_ID|fingerprint=$MATCHED_FINGERPRINT"
 
 	repairResult.Applied = true
 	return repairResult
+}
+
+func ensureAPTRepairUnlocked(exec Executor) error {
+	const lockProbe = `
+set +e
+
+LOCKS=(
+	/var/lib/dpkg/lock-frontend
+	/var/lib/dpkg/lock
+	/var/lib/apt/lists/lock
+	/var/cache/apt/archives/lock
+)
+
+owners="$(fuser "${LOCKS[@]}" 2>/dev/null)"
+status=$?
+
+if [ "$status" -eq 0 ] && [ -n "$owners" ]; then
+	printf 'APT_LOCK_ACTIVE|owners=%s\n' "$owners"
+	exit 20
+fi
+
+exit 0
+`
+
+	output, err := exec.RunSudoWithLabel(
+		lockProbe,
+		"Checking APT/Dpkg Lock State",
+	)
+	if err != nil || strings.Contains(output, "APT_LOCK_ACTIVE|") {
+		return fmt.Errorf(
+			"repair blocked: APT/dpkg package-manager lock is active; wait for the owning transaction to finish and retry: %s",
+			strings.TrimSpace(output),
+		)
+	}
+
+	return nil
 }

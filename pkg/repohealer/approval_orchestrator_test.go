@@ -2,6 +2,7 @@ package repohealer
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -38,8 +39,23 @@ func TestApproveAndApplyAPTRepairExecutesApprovedDockerAction(t *testing.T) {
 	if got.Action.ProfileID != "docker-ce" {
 		t.Fatalf("selected profile ID = %q, want docker-ce", got.Action.ProfileID)
 	}
-	if len(exec.commands) != 3 {
-		t.Fatalf("expected snapshot, repair, verification commands; got %d", len(exec.commands))
+	if len(exec.commands) != 4 {
+		t.Fatalf(
+			"expected lock probe, snapshot, repair, verification commands; got %d",
+			len(exec.commands),
+		)
+	}
+	if !strings.Contains(exec.commands[0], "Checking APT/Dpkg Lock State") {
+		t.Fatalf("first command must check APT/dpkg lock state:\n%s", exec.commands[0])
+	}
+	if !strings.Contains(exec.commands[1], "SUDO:") {
+		t.Fatalf("second command must create the targeted snapshot:\n%s", exec.commands[1])
+	}
+	if !strings.Contains(exec.commands[2], `PROFILE_ID="docker-ce"`) {
+		t.Fatalf("third command must apply the Docker repair:\n%s", exec.commands[2])
+	}
+	if !strings.Contains(exec.commands[3], "apt-get update") {
+		t.Fatalf("fourth command must verify APT health:\n%s", exec.commands[3])
 	}
 }
 
@@ -154,8 +170,23 @@ func TestApproveAndApplyAPTRepairReturnsExecutionFailure(t *testing.T) {
 	if got.Error == nil {
 		t.Fatal("execution failure must return an error")
 	}
-	if len(exec.commands) < 3 {
-		t.Fatalf("expected snapshot, repair, rollback commands; got %d", len(exec.commands))
+	if len(exec.commands) != 4 {
+		t.Fatalf(
+			"expected lock probe, snapshot, repair, rollback commands; got %d",
+			len(exec.commands),
+		)
+	}
+	if !strings.Contains(exec.commands[0], "Checking APT/Dpkg Lock State") {
+		t.Fatalf("first command must check APT/dpkg lock state:\n%s", exec.commands[0])
+	}
+	if !strings.Contains(exec.commands[1], "SUDO:") {
+		t.Fatalf("second command must create the targeted snapshot:\n%s", exec.commands[1])
+	}
+	if !strings.Contains(exec.commands[2], `PROFILE_ID="docker-ce"`) {
+		t.Fatalf("third command must apply the Docker repair:\n%s", exec.commands[2])
+	}
+	if !strings.Contains(exec.commands[3], "SUDO:") {
+		t.Fatalf("fourth command must perform targeted rollback:\n%s", exec.commands[3])
 	}
 }
 
@@ -200,7 +231,22 @@ func TestApproveAndApplyAPTRepairExecutesApprovedDockerBindingMismatch(t *testin
 	if got.RepairResult.RolledBack {
 		t.Fatal("successful Docker binding mismatch repair must not roll back")
 	}
-	if len(exec.commands) != 3 {
-		t.Fatalf("expected snapshot, repair, verification commands; got %d", len(exec.commands))
+	if len(exec.commands) != 4 {
+		t.Fatalf(
+			"expected lock probe, snapshot, repair, verification commands; got %d",
+			len(exec.commands),
+		)
+	}
+	if !strings.Contains(exec.commands[0], "Checking APT/Dpkg Lock State") {
+		t.Fatalf("first command must check APT/dpkg lock state:\n%s", exec.commands[0])
+	}
+	if !strings.Contains(exec.commands[1], "SUDO:") {
+		t.Fatalf("second command must create the targeted snapshot:\n%s", exec.commands[1])
+	}
+	if !strings.Contains(exec.commands[2], `PROFILE_ID="docker-ce"`) {
+		t.Fatalf("third command must apply the Docker repair:\n%s", exec.commands[2])
+	}
+	if !strings.Contains(exec.commands[3], "apt-get update") {
+		t.Fatalf("fourth command must verify APT health:\n%s", exec.commands[3])
 	}
 }
