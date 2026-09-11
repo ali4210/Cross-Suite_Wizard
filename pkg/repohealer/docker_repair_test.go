@@ -77,9 +77,23 @@ func TestApplyKnownAPTRepairsBuildsDockerRepairCommand(t *testing.T) {
 		`SOURCE_LINE="deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian bookworm stable"`,
 		`9DC858229FC7DD38854AE2D88D81803C0EBFCD88`,
 		`D3306A018370199E527AE7997EA0A9C3F273FCD8`,
+		`KEYRING_DIR="$(dirname "$KEYRING_PATH")"`,
+		`SOURCE_DIR="$(dirname "$SOURCE_FILE")"`,
+		`KEYRING_TMP="$(mktemp "$KEYRING_DIR/.cross-suite-${PROFILE_ID}.keyring.XXXXXX")"`,
+		`SOURCE_TMP="$(mktemp "$SOURCE_DIR/.cross-suite-${PROFILE_ID}.source.XXXXXX")"`,
+		`test -s "$KEYRING_TMP"`,
+		`test -s "$SOURCE_TMP"`,
+		`mv -f "$KEYRING_TMP" "$KEYRING_PATH"`,
+		`mv -f "$SOURCE_TMP" "$SOURCE_FILE"`,
+		`KEYRING_TMP=""`,
+		`SOURCE_TMP=""`,
 	} {
 		if !strings.Contains(repairCommand, expected) {
-			t.Fatalf("Docker repair command missing expected content %q:\n%s", expected, repairCommand)
+			t.Fatalf(
+				"Docker repair command missing expected content %q:\n%s",
+				expected,
+				repairCommand,
+			)
 		}
 	}
 
@@ -155,6 +169,12 @@ func TestApplyKnownAPTRepairsAppliesDockerRepairAfterVerification(t *testing.T) 
 	}
 	if !strings.Contains(exec.commands[2], `PROFILE_ID="docker-ce"`) {
 		t.Fatalf("repair command does not target Docker:\n%s", exec.commands[2])
+	}
+	if !strings.Contains(exec.commands[2], `mv -f "$KEYRING_TMP" "$KEYRING_PATH"`) {
+		t.Fatalf("repair command must atomically replace Docker keyring:\n%s", exec.commands[2])
+	}
+	if !strings.Contains(exec.commands[2], `mv -f "$SOURCE_TMP" "$SOURCE_FILE"`) {
+		t.Fatalf("repair command must atomically replace Docker source:\n%s", exec.commands[2])
 	}
 	if !strings.Contains(exec.commands[3], "apt-get update") {
 		t.Fatalf("final command must verify APT update:\n%s", exec.commands[3])

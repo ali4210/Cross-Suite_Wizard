@@ -135,13 +135,25 @@ SOURCE_LINE=%q
 TEMP_DIR=%q
 EXPECTED_FINGERPRINTS=(%s)
 
+KEYRING_DIR="$(dirname "$KEYRING_PATH")"
+SOURCE_DIR="$(dirname "$SOURCE_FILE")"
+KEYRING_TMP=""
+SOURCE_TMP=""
+
 cleanup() {
 	rm -rf "$TEMP_DIR"
+	if [ -n "$KEYRING_TMP" ]; then
+		rm -f "$KEYRING_TMP"
+	fi
+	if [ -n "$SOURCE_TMP" ]; then
+		rm -f "$SOURCE_TMP"
+	fi
 }
 trap cleanup EXIT
 
 mkdir -p "$TEMP_DIR"
-install -d -m 0755 /etc/apt/keyrings
+install -d -m 0755 "$KEYRING_DIR"
+install -d -m 0755 "$SOURCE_DIR"
 
 export GNUPGHOME="$TEMP_DIR/gnupg"
 mkdir -p "$GNUPGHOME"
@@ -178,15 +190,23 @@ gpg --dearmor --yes \
 
 test -s "$TEMP_DIR/vendor.gpg"
 
+KEYRING_TMP="$(mktemp "$KEYRING_DIR/.cross-suite-${PROFILE_ID}.keyring.XXXXXX")"
 install -o root -g root -m 0644 \
 	"$TEMP_DIR/vendor.gpg" \
-	"$KEYRING_PATH"
+	"$KEYRING_TMP"
+test -s "$KEYRING_TMP"
 
-printf '%%s\n' "$SOURCE_LINE" > "$TEMP_DIR/source.list"
+SOURCE_TMP="$(mktemp "$SOURCE_DIR/.cross-suite-${PROFILE_ID}.source.XXXXXX")"
+printf '%%s\n' "$SOURCE_LINE" > "$SOURCE_TMP"
+chown root:root "$SOURCE_TMP"
+chmod 0644 "$SOURCE_TMP"
+test -s "$SOURCE_TMP"
 
-install -o root -g root -m 0644 \
-	"$TEMP_DIR/source.list" \
-	"$SOURCE_FILE"
+mv -f "$KEYRING_TMP" "$KEYRING_PATH"
+KEYRING_TMP=""
+
+mv -f "$SOURCE_TMP" "$SOURCE_FILE"
+SOURCE_TMP=""
 
 echo "REPAIR_APPLIED|$PROFILE_ID|fingerprint=$MATCHED_FINGERPRINT"
 `,
@@ -206,7 +226,14 @@ echo "REPAIR_APPLIED|$PROFILE_ID|fingerprint=$MATCHED_FINGERPRINT"
 	repairResult.Output = strings.TrimSpace(output)
 
 	if err != nil || !strings.Contains(output, "REPAIR_APPLIED|") {
-		repairResult.Error = fmt.Errorf("keyring/source repair failed: %w", err)
+		if err != nil {
+			repairResult.Error = fmt.Errorf("keyring/source repair failed: %w", err)
+		} else {
+			repairResult.Error = fmt.Errorf(
+				"keyring/source repair failed: repair command did not report REPAIR_APPLIED",
+			)
+		}
+
 		rollbackErr := RestoreAPTFileSnapshot(exec, snapshot, snapshotTargets)
 		repairResult.RolledBack = rollbackErr == nil
 		if rollbackErr != nil {
@@ -230,10 +257,17 @@ echo "REPAIR_APPLIED|$PROFILE_ID|fingerprint=$MATCHED_FINGERPRINT"
 		strings.Contains(verificationOut, "BADSIG") ||
 		strings.Contains(verificationOut, "EXPKEYSIG") ||
 		strings.Contains(verificationOut, "Failed to fetch") {
-		repairResult.Error = fmt.Errorf(
-			"post-repair APT verification failed: %w",
-			verifyErr,
-		)
+		if verifyErr != nil {
+			repairResult.Error = fmt.Errorf(
+				"post-repair APT verification failed: %w",
+				verifyErr,
+			)
+		} else {
+			repairResult.Error = fmt.Errorf(
+				"post-repair APT verification failed: repository trust or fetch errors were reported",
+			)
+		}
+
 		rollbackErr := RestoreAPTFileSnapshot(exec, snapshot, snapshotTargets)
 		repairResult.RolledBack = rollbackErr == nil
 		if rollbackErr != nil {
