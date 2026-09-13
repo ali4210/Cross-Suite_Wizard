@@ -71,24 +71,15 @@ func APTListDoctorExitCode(status APTListDoctorStatus) int {
 }
 
 func APTListDoctorMutationAllowed(report APTListDoctorReport) bool {
-	return report.Overall == APTListDoctorStatusReady &&
-		report.CanInspect &&
-		report.CanPreview &&
-		report.CanApply
+	return false
 }
 
 func ValidateAPTListDoctorReport(
 	report APTListDoctorReport,
 ) error {
 	switch report.Overall {
-	case APTListDoctorStatusReady:
-		if APTListDoctorMutationAllowed(report) {
-			return nil
-		}
-		return fmt.Errorf(
-			"ready APT list Doctor report must permit inspection, preview, and apply",
-		)
-	case APTListDoctorStatusWarning,
+	case APTListDoctorStatusReady,
+		APTListDoctorStatusWarning,
 		APTListDoctorStatusBlocked,
 		APTListDoctorStatusUnsupported,
 		APTListDoctorStatusUnknown:

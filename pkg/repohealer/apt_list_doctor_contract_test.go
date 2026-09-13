@@ -103,22 +103,18 @@ func TestValidateAPTListDoctorReportSafetyInvariants(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name: "Ready with all permissions",
+			name: "Ready remains read-only",
 			report: APTListDoctorReport{
-				Overall:    APTListDoctorStatusReady,
-				CanInspect: true,
-				CanPreview: true,
-				CanApply:   true,
+				Overall: APTListDoctorStatusReady,
 			},
 		},
 		{
-			name: "Ready without all permissions",
+			name: "Ready cannot permit inspection",
 			report: APTListDoctorReport{
 				Overall:    APTListDoctorStatusReady,
 				CanInspect: true,
-				CanPreview: true,
 			},
-			wantErr: "ready APT list Doctor report must permit",
+			wantErr: "ready APT list Doctor report must not permit",
 		},
 		{
 			name: "Warning cannot permit mutation",
