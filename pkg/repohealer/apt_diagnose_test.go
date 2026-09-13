@@ -289,3 +289,103 @@ Signed-By: /etc/apt/keyrings/old-docker.gpg
 		)
 	}
 }
+
+func TestAPTAdapterDiagnoseBuildsBlockedHashiCorpAPTListDoctorAction(
+	t *testing.T,
+) {
+	exec := &fakeExecutor{
+		runSudoOutputs: []string{
+			`=== APT_SOURCES ===
+/etc/apt/sources.list.d/hashicorp.list:1:deb [arch=amd64 signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com lory main
+=== SIGNED_BY_REFERENCES ===
+/etc/apt/sources.list.d/hashicorp.list:1:deb [arch=amd64 signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com lory main
+=== DEB822_SOURCES ===
+=== KEYRINGS ===
+/usr/share/keyrings/hashicorp-archive-keyring.gpg	644	root:root
+=== DPKG_AUDIT ===
+=== LOCK_OWNERS ===
+=== STORAGE ===
+=== TIME ===`,
+			`Err:1 https://apt.releases.hashicorp.com lory InRelease
+  The following signatures couldn't be verified because the public key is not available: NO_PUBKEY FC9CA96ACA026560`,
+			"PRESENT\n",
+		},
+	}
+
+	adapter := APTAdapter{}
+
+	_, findings, actions := adapter.Diagnose(
+		exec,
+		TargetFacts{
+			Platform:       PlatformLinux,
+			Distribution:   "debian",
+			Version:        "6.4",
+			Codename:       "lory",
+			Architecture:   "amd64",
+			PackageManager: ManagerAPT,
+		},
+		DefaultDiagnosticPolicy(),
+	)
+
+	var missingKeyFound bool
+	for _, finding := range findings {
+		if finding.Code == "APT_REPO_KEY_MISSING" &&
+			strings.Contains(finding.Evidence, "FC9CA96ACA026560") {
+			missingKeyFound = true
+			break
+		}
+	}
+
+	if !missingKeyFound {
+		t.Fatalf("findings = %#v, want NO_PUBKEY HashiCorp finding", findings)
+	}
+
+	if len(actions) != 1 {
+		t.Fatalf("action count = %d, want 1: %#v", len(actions), actions)
+	}
+
+	action := actions[0]
+
+	if action.ID != "apt-keyring-repair-hashicorp" {
+		t.Fatalf("action ID = %q", action.ID)
+	}
+	if action.FindingCode != "APT_REPO_KEY_MISSING" {
+		t.Fatalf("finding code = %q", action.FindingCode)
+	}
+	if action.Eligible {
+		t.Fatal("HashiCorp Doctor action must be blocked from repair")
+	}
+	if action.RequiresConsent {
+		t.Fatal("HashiCorp Doctor action must not request repair consent")
+	}
+	if action.Risk != RiskBlocked {
+		t.Fatalf("risk = %q, want %q", action.Risk, RiskBlocked)
+	}
+	if action.ProfileID != HashiCorpAPTListProfileID {
+		t.Fatalf("profile ID = %q", action.ProfileID)
+	}
+	if action.RepositoryURL != HashiCorpAPTListRepositoryURL {
+		t.Fatalf("repository URL = %q", action.RepositoryURL)
+	}
+	if action.SourceFile != "/etc/apt/sources.list.d/hashicorp.list" {
+		t.Fatalf("source file = %q", action.SourceFile)
+	}
+	if action.SourceLine != 1 {
+		t.Fatalf("source line = %d, want 1", action.SourceLine)
+	}
+	if action.SourceFormat != SourceFormatAPTList {
+		t.Fatalf("source format = %q", action.SourceFormat)
+	}
+	if action.KeyringPath != HashiCorpAPTListKeyringPath {
+		t.Fatalf("keyring path = %q", action.KeyringPath)
+	}
+	if len(action.Commands) != 0 ||
+		len(action.Verification) != 0 ||
+		len(action.Rollback) != 0 ||
+		len(action.SnapshotTargets) != 0 {
+		t.Fatalf(
+			"Doctor action must contain no mutation plan: %#v",
+			action,
+		)
+	}
+}
