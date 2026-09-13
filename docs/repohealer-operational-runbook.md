@@ -79,6 +79,72 @@ Disable the policy after the maintenance window:
 unset CROSS_SUITE_DEB822_REPAIR_ENABLED
 ```
 
+## Execution audit
+
+Repo Healer persists one redacted JSON Lines audit record for each completed Deb822 approval or execution outcome, including declined, blocked, applied, and failed results.
+
+Configure the operator-local audit path with:
+
+```bash
+export CROSS_SUITE_DEB822_AUDIT_PATH="$HOME/.local/state/cross-suite/repohealer-deb822-audit.jsonl"
+```
+
+If the variable is unset or blank, Repo Healer uses:
+
+```text
+/var/log/cross-suite/repohealer-deb822-audit.jsonl
+```
+
+For interactive development and ordinary user sessions, prefer a user-local path. The default `/var/log/cross-suite/` path generally requires a privileged or specially configured service account.
+
+On Unix, Repo Healer creates the audit directory with mode `0700` and creates the audit file with mode `0600`. The format is JSON Lines: one newline-terminated JSON object per completed decision or execution result.
+
+Audit records include the timestamp, result status, action/profile identifiers, approved source and keyring paths, attempt/applied/rollback state, snapshot metadata, and a controlled failure category.
+
+Audit records intentionally exclude raw command output, verification output, rendered source content, raw error or reason text, credentials, passwords, tokens, key material, and environment values.
+
+If the audit record cannot be written, Repo Healer prints a warning. Audit persistence failure does not change the completed repair result or trigger additional target-host activity.
+
+Inspect a user-local audit log with:
+
+```bash
+tail -n 20 "$CROSS_SUITE_DEB822_AUDIT_PATH"
+jq . "$CROSS_SUITE_DEB822_AUDIT_PATH"
+stat -c '%a %U:%G %n' "$CROSS_SUITE_DEB822_AUDIT_PATH"
+```
+
+## Doctor preflight
+
+Before Repo Healer reads a selected Deb822 source or offers a preview, it runs a local Doctor preflight report for the selected action.
+
+Doctor is read-only. For a supported selected Deb822 action, it uses the existing non-interactive labeled sudo transport to run one fixed metadata-only probe on the target before source-content inspection.
+
+The remote Doctor probe checks `apt-get` availability, the selected source and keyring file metadata, and standard APT/dpkg lock state. It does not read source or keyring contents, create temporary files, create snapshots, modify files, download keys, or run `apt-get update`.
+
+Doctor reports `READY`, `WARNING`, `BLOCKED`, or `UNSUPPORTED` and checks the selected action's source format, required binding fields, verified vendor profile, repository URL binding, keyring binding, approved Deb822 source-path scope, target-facts match, local execution-policy state, and local audit-path readiness.
+
+`READY` and `WARNING` allow the tool to continue to remote Deb822 inspection and preview. `BLOCKED` and `UNSUPPORTED` stop before remote source inspection. `WARNING` may still prevent apply; for example, a disabled execution policy allows preview but not mutation.
+
+## Preview and apply flow
+
+Deb822 repair begins in preview mode. Preview validates the inspected source and the exact bound repair request, then displays the approved source file, keyring path, snapshot scope, pinned signing-key fingerprints, and rendered Deb822 replacement.
+
+Preview mode does not invoke privileged commands, create a target snapshot, modify a source or keyring file, download a key, or run `apt-get update`. Preview remains available even when Deb822 repair execution policy is disabled.
+
+After the preview, Repo Healer exits without changes unless the operator enters exactly `a` to proceed to apply confirmation. Values such as an empty response, `p`, `q`, `no`, `yes`, or `apply` exit after preview and do not reach the apply-confirmation prompt.
+
+After entering `a`, the operator must still enter explicit approval (`yes` or `y`) for the displayed repair. Mutation remains disabled unless the local process environment also contains:
+
+```bash
+export CROSS_SUITE_DEB822_REPAIR_ENABLED=true
+```
+
+This produces three separate controls for a real repair:
+
+1. A safe and bound inspection/request.
+2. An explicit preview-to-apply selection followed by typed approval.
+3. A local operator execution-policy opt-in.
+
 ## Operator procedure
 
 1. Run Repo Healer diagnosis for the target.

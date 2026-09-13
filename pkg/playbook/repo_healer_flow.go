@@ -2,6 +2,7 @@ package playbook
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -76,6 +77,22 @@ func runSelectedRepositoryRepairFlow(
 	fmt.Println("\n" + repohealer.FormatRepairAction(selectedAction))
 
 	if !selectedAction.Eligible {
+		doctor := repohealer.DiagnoseSelectedDeb822RepairRemoteReadiness(
+			repoHealerExecutor{client: client},
+			result.Target,
+			selectedAction,
+		)
+		fmt.Println("\n" + repohealer.FormatDeb822DoctorReport(doctor))
+
+		if !canProceedToDeb822Inspection(doctor) {
+			fmt.Println(
+				Yellow +
+					"[BLOCKED] Deb822 Doctor did not permit inspection. No system changes were made." +
+					Reset,
+			)
+			return
+		}
+
 		inspection, inspected := inspectSelectedDeb822Repair(
 			client,
 			result,
@@ -150,6 +167,12 @@ func runSelectedRepositoryRepairFlow(
 	)
 }
 
+func canProceedToDeb822Inspection(
+	report repohealer.Deb822DoctorReport,
+) bool {
+	return report.CanPreview
+}
+
 func inspectSelectedDeb822Repair(
 	client *ssh.Client,
 	result repohealer.Result,
@@ -217,6 +240,54 @@ func runSelectedDeb822RepairExecutionFlow(
 		return
 	}
 
+	preview := repohealer.PreviewDeb822Repair(inspection, request)
+	fmt.Println("\n" + repohealer.FormatDeb822RepairDryRun(preview))
+
+	auditPath := repohealer.Deb822RepairAuditPath()
+	previewAudit := repohealer.BuildDeb822RepairPreviewAuditEvent(
+		preview,
+		time.Now(),
+	)
+	if err := repohealer.AppendDeb822RepairPreviewAuditEvent(
+		auditPath,
+		previewAudit,
+	); err != nil {
+		fmt.Fprintf(
+			os.Stderr,
+			Yellow+
+				"WARNING: Deb822 preview was completed, but its audit event could not be persisted to %q: %v\n"+
+				Reset,
+			auditPath,
+			err,
+		)
+	} else {
+		fmt.Printf(
+			Cyan+
+				"Preview audit record written: %s (ready=%t)\n"+
+				Reset,
+			auditPath,
+			previewAudit.Ready,
+		)
+	}
+
+	if !preview.Ready {
+		return
+	}
+
+	mode := strings.TrimSpace(
+		transfer.ReadRealtimeInput(
+			"Type a to continue to apply confirmation, or press Enter to exit after preview: ",
+		),
+	)
+	if !shouldContinueDeb822RepairAfterPreview(mode) {
+		fmt.Println(
+			Yellow +
+				"[PREVIEW COMPLETE] No system changes were made." +
+				Reset,
+		)
+		return
+	}
+
 	fmt.Println(
 		Red + Bold +
 			"\n[!] APPLY MODE: The reviewed Deb822 repair may modify only the displayed source and keyring files." +
@@ -244,9 +315,34 @@ func runSelectedDeb822RepairExecutionFlow(
 	fmt.Println("\n" + repohealer.FormatDeb822RepairApprovalResult(execution))
 
 	audit := repohealer.BuildDeb822RepairAuditEvent(execution, time.Now())
-	fmt.Printf(
-		Cyan+"Audit event: status=%s failure_category=%s\n"+Reset,
-		audit.Status,
-		audit.FailureCategory,
-	)
+	if err := repohealer.AppendDeb822RepairAuditEvent(auditPath, audit); err != nil {
+		fmt.Fprintf(
+			os.Stderr,
+			Yellow+
+				"WARNING: Deb822 repair outcome was completed, but its audit event could not be persisted to %q: %v\n"+
+				Reset,
+			auditPath,
+			err,
+		)
+	} else {
+		fmt.Printf(
+			Cyan+
+				"Audit record written: %s (status=%s failure_category=%s)\n"+
+				Reset,
+			auditPath,
+			audit.Status,
+			audit.FailureCategory,
+		)
+	}
+}
+
+func appendDeb822RepairAudit(
+	auditPath string,
+	audit repohealer.Deb822RepairAuditEvent,
+) error {
+	return repohealer.AppendDeb822RepairAuditEvent(auditPath, audit)
+}
+
+func shouldContinueDeb822RepairAfterPreview(input string) bool {
+	return strings.EqualFold(strings.TrimSpace(input), "a")
 }
