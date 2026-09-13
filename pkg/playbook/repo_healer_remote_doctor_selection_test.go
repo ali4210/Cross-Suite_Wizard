@@ -52,3 +52,58 @@ func TestBlockedDeb822DoctorActionsReturnsEmptyForNoEligibleActions(
 		t.Fatalf("eligible actions = %#v, want none", got)
 	}
 }
+
+func TestBlockedAPTListDoctorActionsReturnsOnlyTrustedBlockedHashiCorpActions(
+	t *testing.T,
+) {
+	accepted := blockedHashiCorpAPTListPlaybookAction()
+
+	eligible := accepted
+	eligible.ID = "eligible-apt-list"
+	eligible.Eligible = true
+
+	consentBearing := accepted
+	consentBearing.ID = "consent-bearing-apt-list"
+	consentBearing.RequiresConsent = true
+
+	deb822 := accepted
+	deb822.ID = "deb822"
+	deb822.SourceFormat = repohealer.SourceFormatDeb822
+
+	wrongProfile := accepted
+	wrongProfile.ID = "wrong-profile"
+	wrongProfile.ProfileID = "docker"
+
+	wrongRepository := accepted
+	wrongRepository.ID = "wrong-repository"
+	wrongRepository.RepositoryURL = "https://example.invalid/apt"
+
+	wrongKeyring := accepted
+	wrongKeyring.ID = "wrong-keyring"
+	wrongKeyring.KeyringPath = "/usr/share/keyrings/untrusted.gpg"
+
+	got := blockedAPTListDoctorActions([]repohealer.RepairAction{
+		eligible,
+		consentBearing,
+		deb822,
+		wrongProfile,
+		wrongRepository,
+		wrongKeyring,
+		accepted,
+	})
+
+	if len(got) != 1 {
+		t.Fatalf("eligible action count = %d, want 1: %#v", len(got), got)
+	}
+	if got[0].ID != accepted.ID {
+		t.Fatalf("selected action ID = %q, want %q", got[0].ID, accepted.ID)
+	}
+}
+
+func TestBlockedAPTListDoctorActionsReturnsEmptyForNoEligibleActions(
+	t *testing.T,
+) {
+	if got := blockedAPTListDoctorActions(nil); len(got) != 0 {
+		t.Fatalf("eligible actions = %#v, want none", got)
+	}
+}

@@ -160,7 +160,7 @@ func TestRunSelfHealingTroubleshooterExposesReadOnlyRemoteDoctorMode(
 
 	for _, required := range []string{
 		`[3] Run remote Deb822 Doctor on a discovered blocked action (read-only)`,
-		`Select mode [0-3, default: 1]: `,
+		`Select mode [0-4, default: 1]: `,
 		`if modeChoice == "3" {`,
 		`runSelectedDeb822DoctorRemoteFlow(client, result)`,
 	} {
