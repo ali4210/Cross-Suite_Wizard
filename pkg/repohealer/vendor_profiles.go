@@ -32,6 +32,20 @@ func KnownVendorProfiles() []VendorProfile {
 			SourceLine: "deb [arch=amd64 signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/code stable main",
 		},
 		{
+			ID:             "hashicorp",
+			DisplayName:    "HashiCorp",
+			PackageManager: ManagerAPT,
+			AllowedURLPrefixes: []string{
+				"https://apt.releases.hashicorp.com",
+			},
+			KeyURL:      "https://apt.releases.hashicorp.com/gpg",
+			KeyringPath: "/usr/share/keyrings/hashicorp-archive-keyring.gpg",
+			ExpectedFingerprints: []string{
+				"D55C0D1AC78A8D8126CB631CFC9CA96ACA026560",
+			},
+			SourceFile: "/etc/apt/sources.list.d/hashicorp.list",
+		},
+		{
 			ID:             "docker-ce",
 			DisplayName:    "Docker CE",
 			PackageManager: ManagerAPT,
@@ -50,13 +64,16 @@ func KnownVendorProfiles() []VendorProfile {
 }
 
 func FindVendorProfile(manager PackageManager, repositoryURL string) (VendorProfile, bool) {
+	repositoryURL = strings.TrimSpace(repositoryURL)
+
 	for _, profile := range KnownVendorProfiles() {
 		if profile.PackageManager != manager {
 			continue
 		}
 
 		for _, prefix := range profile.AllowedURLPrefixes {
-			if strings.HasPrefix(repositoryURL, prefix) {
+			if repositoryURL == prefix ||
+				strings.HasPrefix(repositoryURL, prefix+"/") {
 				return profile, true
 			}
 		}
