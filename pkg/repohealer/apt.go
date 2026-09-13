@@ -21,6 +21,7 @@ func (APTAdapter) Diagnose(
 	var evidence []CommandEvidence
 	var findings []Finding
 	var actions []RepairAction
+	var aptListReferences []APTSourceReference
 
 	seenKeyIDs := make(map[string]bool)
 	seenMissingKeyrings := make(map[string]bool)
@@ -201,6 +202,7 @@ exit ${PIPESTATUS[0]}
 		if !ok {
 			continue
 		}
+		aptListReferences = append(aptListReferences, reference)
 		handleReference(reference)
 	}
 
@@ -306,6 +308,17 @@ exit ${PIPESTATUS[0]}
 			RequiresConsent: false,
 		})
 	}
+
+	actions = append(
+		actions,
+		BuildAPTListDoctorActions(
+			Result{
+				Target:   facts,
+				Findings: findings,
+			},
+			aptListReferences,
+		)...,
+	)
 
 	return evidence, findings, actions
 }
