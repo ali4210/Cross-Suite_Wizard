@@ -305,3 +305,85 @@ func TestEvaluateHashiCorpAPTListRepairPreflightRejectsUnsafeState(
 		})
 	}
 }
+
+func TestEvaluateHashiCorpAPTListRepairPreflightAllowsMissingKeyring(
+	t *testing.T,
+) {
+	request := readyHashiCorpAPTListRepairExecutionRequest(t)
+	probe := readyHashiCorpAPTListRepairPreflightProbe()
+	probe.Keyring = HashiCorpAPTListRepairPreflightFile{
+		State: HashiCorpAPTListRepairPreflightFileMissing,
+	}
+	report := blockedHashiCorpAPTListRepairDoctorReport(t)
+
+	got := EvaluateHashiCorpAPTListRepairPreflight(
+		request,
+		probe,
+		report,
+	)
+
+	if !got.Ready {
+		t.Fatalf(
+			"preflight unexpectedly blocked for a missing keyring: %s",
+			got.Reason,
+		)
+	}
+
+	if got.Keyring.State != HashiCorpAPTListRepairPreflightFileMissing {
+		t.Fatalf(
+			"keyring state = %q, want %q",
+			got.Keyring.State,
+			HashiCorpAPTListRepairPreflightFileMissing,
+		)
+	}
+}
+
+func TestEvaluateHashiCorpAPTListRepairPreflightAllowsMissingKeyringWithNoFileMetadata(
+	t *testing.T,
+) {
+	request := readyHashiCorpAPTListRepairExecutionRequest(t)
+	probe := readyHashiCorpAPTListRepairPreflightProbe()
+	probe.Keyring = HashiCorpAPTListRepairPreflightFile{
+		State:  HashiCorpAPTListRepairPreflightFileMissing,
+		UID:    1000,
+		Mode:   "777",
+		Size:   -1,
+		SHA256: "not-a-sha256",
+	}
+	report := blockedHashiCorpAPTListRepairDoctorReport(t)
+
+	got := EvaluateHashiCorpAPTListRepairPreflight(
+		request,
+		probe,
+		report,
+	)
+
+	if !got.Ready {
+		t.Fatalf(
+			"preflight unexpectedly blocked for a missing keyring: %s",
+			got.Reason,
+		)
+	}
+}
+
+func TestEvaluateHashiCorpAPTListRepairPreflightRejectsSymlinkKeyring(
+	t *testing.T,
+) {
+	request := readyHashiCorpAPTListRepairExecutionRequest(t)
+	probe := readyHashiCorpAPTListRepairPreflightProbe()
+	probe.Keyring.State = HashiCorpAPTListRepairPreflightFileSymlink
+	report := blockedHashiCorpAPTListRepairDoctorReport(t)
+
+	got := EvaluateHashiCorpAPTListRepairPreflight(
+		request,
+		probe,
+		report,
+	)
+
+	if got.Ready {
+		t.Fatalf("preflight unexpectedly ready for a symlink keyring")
+	}
+	if !strings.Contains(strings.ToLower(got.Reason), "keyring") {
+		t.Fatalf("reason = %q, want it to contain keyring", got.Reason)
+	}
+}

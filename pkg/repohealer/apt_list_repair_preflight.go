@@ -71,7 +71,7 @@ func EvaluateHashiCorpAPTListRepairPreflight(
 		return result
 	}
 
-	if err := validateHashiCorpAPTListRepairPreflightFile("keyring", probe.Keyring); err != nil {
+	if err := validateHashiCorpAPTListRepairPreflightKeyring(probe.Keyring); err != nil {
 		result.Reason = err.Error()
 		return result
 	}
@@ -144,6 +144,16 @@ func validateHashiCorpAPTListRepairExecutionRequest(
 	}
 
 	return nil
+}
+
+func validateHashiCorpAPTListRepairPreflightKeyring(
+	keyring HashiCorpAPTListRepairPreflightFile,
+) error {
+	if keyring.State == HashiCorpAPTListRepairPreflightFileMissing {
+		return nil
+	}
+
+	return validateHashiCorpAPTListRepairPreflightFile("keyring", keyring)
 }
 
 func validateHashiCorpAPTListRepairPreflightFile(
