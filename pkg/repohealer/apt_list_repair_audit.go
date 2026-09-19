@@ -1,6 +1,11 @@
 package repohealer
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -68,4 +73,68 @@ func classifyHashiCorpAPTListRepairFailure(
 	default:
 		return RepairFailureUnknown
 	}
+}
+
+const (
+	hashicorpAPTListRepairAuditPathEnv     = "CROSS_SUITE_HASHICORP_APT_LIST_REPAIR_AUDIT_PATH"
+	defaultHashiCorpAPTListRepairAuditPath = "/var/log/cross-suite/repohealer-hashicorp-apt-list-audit.jsonl"
+)
+
+func HashiCorpAPTListRepairAuditPath() string {
+	if path := strings.TrimSpace(os.Getenv(hashicorpAPTListRepairAuditPathEnv)); path != "" {
+		return path
+	}
+
+	return defaultHashiCorpAPTListRepairAuditPath
+}
+
+func AppendHashiCorpAPTListRepairAuditEvent(
+	path string,
+	event HashiCorpAPTListRepairAuditEvent,
+) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return errors.New("HashiCorp APT-list repair audit path is empty")
+	}
+
+	parent := filepath.Dir(path)
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return fmt.Errorf(
+			"create HashiCorp APT-list repair audit directory %q: %w",
+			parent,
+			err,
+		)
+	}
+
+	file, err := os.OpenFile(
+		path,
+		os.O_WRONLY|os.O_APPEND|os.O_CREATE,
+		0o600,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"open HashiCorp APT-list repair audit file %q: %w",
+			path,
+			err,
+		)
+	}
+	defer file.Close()
+
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf(
+			"encode HashiCorp APT-list repair audit event: %w",
+			err,
+		)
+	}
+
+	if _, err := file.Write(append(encoded, '\n')); err != nil {
+		return fmt.Errorf(
+			"append HashiCorp APT-list repair audit event to %q: %w",
+			path,
+			err,
+		)
+	}
+
+	return nil
 }
