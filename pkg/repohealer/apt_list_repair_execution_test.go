@@ -78,6 +78,64 @@ func (f *hashiCorpAPTListRepairExecutionFakeExecutor) RunSudoWithLabel(
 	return response.output, response.err
 }
 
+type hashiCorpAPTListRepairExecutionPublicFakeExecutor struct {
+	probeOutput string
+	probeErr    error
+	probeCalls  int
+
+	labeledOutputs []hashiCorpAPTListRepairExecutionFakeResponse
+	sudoOutputs    []hashiCorpAPTListRepairExecutionFakeResponse
+	labeledCalls   int
+	sudoCalls      int
+	scripts        []string
+	labels         []string
+	sudoScripts    []string
+}
+
+func (f *hashiCorpAPTListRepairExecutionPublicFakeExecutor) Run(
+	command string,
+) (string, error) {
+	return "", fmt.Errorf("unexpected Run call: %s", command)
+}
+
+func (f *hashiCorpAPTListRepairExecutionPublicFakeExecutor) RunSudo(
+	script string,
+) (string, error) {
+	if f.sudoCalls >= len(f.sudoOutputs) {
+		return "", fmt.Errorf("unexpected RunSudo call %d", f.sudoCalls+1)
+	}
+
+	response := f.sudoOutputs[f.sudoCalls]
+	f.sudoCalls++
+	f.sudoScripts = append(f.sudoScripts, script)
+
+	return response.output, response.err
+}
+
+func (f *hashiCorpAPTListRepairExecutionPublicFakeExecutor) RunSudoWithLabel(
+	script string,
+	label string,
+) (string, error) {
+	if label == hashicorpAPTListRepairPreflightProbeLabel {
+		f.probeCalls++
+		return f.probeOutput, f.probeErr
+	}
+
+	if f.labeledCalls >= len(f.labeledOutputs) {
+		return "", fmt.Errorf(
+			"unexpected mutation/verification RunSudoWithLabel call %d",
+			f.labeledCalls+1,
+		)
+	}
+
+	response := f.labeledOutputs[f.labeledCalls]
+	f.labeledCalls++
+	f.scripts = append(f.scripts, script)
+	f.labels = append(f.labels, label)
+
+	return response.output, response.err
+}
+
 func TestExecuteHashiCorpAPTListRepairBlocksInvalidRequestWithoutExecution(
 	t *testing.T,
 ) {
@@ -145,13 +203,13 @@ func TestExecuteHashiCorpAPTListRepairBlocksMismatchedPreflightWithoutExecution(
 	}
 }
 
-func TestExecuteHashiCorpAPTListRepairReprobesBeforeAnyMutation(
+func TestExecuteHashiCorpAPTListRepairBlocksWhenFreshPreflightIsNotReady(
 	t *testing.T,
 ) {
 	request := readyHashiCorpAPTListRepairExecutionRequest(t)
 
 	exec := &hashiCorpAPTListRepairPreflightProbeFakeExecutor{
-		output: readyHashiCorpAPTListRepairPreflightProbeOutputWithPresentKeyring(),
+		output: readyHashiCorpAPTListRepairPreflightProbeOutput(),
 	}
 
 	got := ExecuteHashiCorpAPTListRepair(
@@ -175,10 +233,16 @@ func TestExecuteHashiCorpAPTListRepairReprobesBeforeAnyMutation(
 		)
 	}
 	if got.Status != HashiCorpAPTListRepairExecutionBlocked {
-		t.Fatalf("status = %q, want blocked until mutation is implemented", got.Status)
+		t.Fatalf("status = %q, want blocked", got.Status)
 	}
-	if got.Reason != "HashiCorp APT-list repair execution is not implemented" {
-		t.Fatalf("reason = %q", got.Reason)
+	if got.Attempted {
+		t.Fatal("attempted = true, want false")
+	}
+	if !strings.Contains(
+		strings.ToLower(got.Reason),
+		"fresh preflight is not ready",
+	) {
+		t.Fatalf("reason = %q, want fresh-preflight block", got.Reason)
 	}
 }
 
@@ -626,6 +690,129 @@ func TestApplyHashiCorpAPTListRepairExecutionRollsBackOnAPTVerificationCommandEr
 			"verification output = %q, want empty output on command error",
 			got.VerificationOut,
 		)
+	}
+	if exec.labeledCalls != 2 {
+		t.Fatalf(
+			"labeled calls = %d, want 2 (mutation + verification)",
+			exec.labeledCalls,
+		)
+	}
+	if exec.sudoCalls != 2 {
+		t.Fatalf(
+			"sudo calls = %d, want 2 (snapshot + rollback)",
+			exec.sudoCalls,
+		)
+	}
+}
+
+func TestExecuteHashiCorpAPTListRepairAppliesAfterFreshReadyPreflight(
+	t *testing.T,
+) {
+	request := readyHashiCorpAPTListRepairExecutionRequest(t)
+
+	exec := &hashiCorpAPTListRepairExecutionPublicFakeExecutor{
+		probeOutput: readyHashiCorpAPTListRepairPreflightProbeOutputWithPresentKeyring(),
+		labeledOutputs: []hashiCorpAPTListRepairExecutionFakeResponse{
+			{
+				output: "HASHICORP_APT_LIST_REPAIR_APPLIED|hashicorp|fingerprint=" +
+					request.ExpectedFingerprint,
+			},
+			{
+				output: "Hit:1 https://apt.releases.hashicorp.com bookworm InRelease\n" +
+					"HASHICORP_APT_LIST_REPAIR_VERIFIED|host=apt.releases.hashicorp.com|exit=0",
+			},
+		},
+		sudoOutputs: []hashiCorpAPTListRepairExecutionFakeResponse{
+			{},
+		},
+	}
+
+	got := ExecuteHashiCorpAPTListRepair(
+		exec,
+		request,
+		HashiCorpAPTListRepairPreflight{
+			Request:      request,
+			Ready:        true,
+			DoctorReport: blockedHashiCorpAPTListRepairDoctorReport(t),
+		},
+	)
+
+	if got.Status != HashiCorpAPTListRepairExecutionApplied {
+		t.Fatalf("status = %q, want applied", got.Status)
+	}
+	if !got.Attempted {
+		t.Fatal("attempted = false, want true")
+	}
+	if !got.Applied {
+		t.Fatal("applied = false, want true")
+	}
+	if got.RolledBack {
+		t.Fatal("rolledBack = true, want false")
+	}
+	if exec.probeCalls != 1 {
+		t.Fatalf("fresh probe calls = %d, want 1", exec.probeCalls)
+	}
+	if exec.labeledCalls != 2 {
+		t.Fatalf(
+			"labeled calls = %d, want 2 (mutation + verification)",
+			exec.labeledCalls,
+		)
+	}
+	if exec.sudoCalls != 1 {
+		t.Fatalf("sudo calls = %d, want 1 (snapshot only)", exec.sudoCalls)
+	}
+}
+
+func TestExecuteHashiCorpAPTListRepairRollsBackAfterFreshPreflightVerificationFailure(
+	t *testing.T,
+) {
+	request := readyHashiCorpAPTListRepairExecutionRequest(t)
+
+	exec := &hashiCorpAPTListRepairExecutionPublicFakeExecutor{
+		probeOutput: readyHashiCorpAPTListRepairPreflightProbeOutputWithPresentKeyring(),
+		labeledOutputs: []hashiCorpAPTListRepairExecutionFakeResponse{
+			{
+				output: "HASHICORP_APT_LIST_REPAIR_APPLIED|hashicorp|fingerprint=" +
+					request.ExpectedFingerprint,
+			},
+			{
+				output: "W: GPG error: https://apt.releases.hashicorp.com bookworm InRelease: NO_PUBKEY FC9CA96ACA026560\n" +
+					"W: Failed to fetch https://apt.releases.hashicorp.com/dists/bookworm/InRelease",
+			},
+		},
+		sudoOutputs: []hashiCorpAPTListRepairExecutionFakeResponse{
+			{},
+			{},
+		},
+	}
+
+	got := ExecuteHashiCorpAPTListRepair(
+		exec,
+		request,
+		HashiCorpAPTListRepairPreflight{
+			Request:      request,
+			Ready:        true,
+			DoctorReport: blockedHashiCorpAPTListRepairDoctorReport(t),
+		},
+	)
+
+	if got.Status != HashiCorpAPTListRepairExecutionFailed {
+		t.Fatalf("status = %q, want failed", got.Status)
+	}
+	if !got.Attempted {
+		t.Fatal("attempted = false, want true")
+	}
+	if got.Applied {
+		t.Fatal("applied = true, want false")
+	}
+	if !got.RolledBack {
+		t.Fatal("rolledBack = false, want true")
+	}
+	if !strings.Contains(strings.ToLower(got.Reason), "verification") {
+		t.Fatalf("reason = %q, want verification failure", got.Reason)
+	}
+	if exec.probeCalls != 1 {
+		t.Fatalf("fresh probe calls = %d, want 1", exec.probeCalls)
 	}
 	if exec.labeledCalls != 2 {
 		t.Fatalf(

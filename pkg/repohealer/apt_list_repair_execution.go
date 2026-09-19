@@ -79,8 +79,11 @@ func ExecuteHashiCorpAPTListRepair(
 		return result
 	}
 
-	result.Reason = "HashiCorp APT-list repair execution is not implemented"
-	return result
+	return applyHashiCorpAPTListRepairExecution(
+		exec,
+		request,
+		freshPreflight.DoctorReport,
+	)
 }
 
 func buildHashiCorpAPTListRepairExecutionScript(
