@@ -315,6 +315,12 @@ func TestEvaluateHashiCorpAPTListRepairPreflightAllowsMissingKeyring(
 		State: HashiCorpAPTListRepairPreflightFileMissing,
 	}
 	report := blockedHashiCorpAPTListRepairDoctorReport(t)
+	setHashiCorpAPTListDoctorCheckStatus(
+		t,
+		&report,
+		"remote_keyring_file",
+		APTListDoctorStatusBlocked,
+	)
 
 	got := EvaluateHashiCorpAPTListRepairPreflight(
 		request,
@@ -351,6 +357,12 @@ func TestEvaluateHashiCorpAPTListRepairPreflightAllowsMissingKeyringWithNoFileMe
 		SHA256: "not-a-sha256",
 	}
 	report := blockedHashiCorpAPTListRepairDoctorReport(t)
+	setHashiCorpAPTListDoctorCheckStatus(
+		t,
+		&report,
+		"remote_keyring_file",
+		APTListDoctorStatusBlocked,
+	)
 
 	got := EvaluateHashiCorpAPTListRepairPreflight(
 		request,
@@ -385,5 +397,119 @@ func TestEvaluateHashiCorpAPTListRepairPreflightRejectsSymlinkKeyring(
 	}
 	if !strings.Contains(strings.ToLower(got.Reason), "keyring") {
 		t.Fatalf("reason = %q, want it to contain keyring", got.Reason)
+	}
+}
+
+func setHashiCorpAPTListDoctorCheckStatus(
+	t *testing.T,
+	report *APTListDoctorReport,
+	name string,
+	status APTListDoctorStatus,
+) {
+	t.Helper()
+
+	for index := range report.Checks {
+		if report.Checks[index].Name == name {
+			report.Checks[index].Status = status
+			return
+		}
+	}
+
+	t.Fatalf("Doctor check %q not found", name)
+}
+
+func TestEvaluateHashiCorpAPTListRepairPreflightAllowsMissingKeyringWithBlockedDoctorCheck(
+	t *testing.T,
+) {
+	request := readyHashiCorpAPTListRepairExecutionRequest(t)
+	probe := readyHashiCorpAPTListRepairPreflightProbe()
+	probe.Keyring = HashiCorpAPTListRepairPreflightFile{
+		State: HashiCorpAPTListRepairPreflightFileMissing,
+	}
+	report := blockedHashiCorpAPTListRepairDoctorReport(t)
+	setHashiCorpAPTListDoctorCheckStatus(
+		t,
+		&report,
+		"remote_keyring_file",
+		APTListDoctorStatusBlocked,
+	)
+
+	got := EvaluateHashiCorpAPTListRepairPreflight(
+		request,
+		probe,
+		report,
+	)
+
+	if !got.Ready {
+		t.Fatalf(
+			"preflight unexpectedly blocked for missing keyring with blocked Doctor check: %s",
+			got.Reason,
+		)
+	}
+}
+
+func TestEvaluateHashiCorpAPTListRepairPreflightRejectsConflictingDoctorKeyringState(
+	t *testing.T,
+) {
+	tests := []struct {
+		name         string
+		keyringState HashiCorpAPTListRepairPreflightFileState
+		doctorState  APTListDoctorStatus
+	}{
+		{
+			name:         "Missing keyring with Doctor ready",
+			keyringState: HashiCorpAPTListRepairPreflightFileMissing,
+			doctorState:  APTListDoctorStatusReady,
+		},
+		{
+			name:         "Present keyring with Doctor blocked",
+			keyringState: HashiCorpAPTListRepairPreflightFilePresent,
+			doctorState:  APTListDoctorStatusBlocked,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := readyHashiCorpAPTListRepairExecutionRequest(t)
+			probe := readyHashiCorpAPTListRepairPreflightProbe()
+			if test.keyringState == HashiCorpAPTListRepairPreflightFileMissing {
+				probe.Keyring = HashiCorpAPTListRepairPreflightFile{
+					State: HashiCorpAPTListRepairPreflightFileMissing,
+				}
+			} else {
+				probe.Keyring.State = test.keyringState
+			}
+
+			report := blockedHashiCorpAPTListRepairDoctorReport(t)
+			setHashiCorpAPTListDoctorCheckStatus(
+				t,
+				&report,
+				"remote_keyring_file",
+				test.doctorState,
+			)
+
+			got := EvaluateHashiCorpAPTListRepairPreflight(
+				request,
+				probe,
+				report,
+			)
+
+			if got.Ready {
+				t.Fatalf(
+					"preflight unexpectedly ready for keyring state %q and Doctor status %q",
+					test.keyringState,
+					test.doctorState,
+				)
+			}
+			if !strings.Contains(
+				strings.ToLower(got.Reason),
+				"keyring",
+			) {
+				t.Fatalf(
+					"reason = %q, want it to contain keyring",
+					got.Reason,
+				)
+			}
+		})
 	}
 }

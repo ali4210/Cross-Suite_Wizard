@@ -100,7 +100,11 @@ func EvaluateHashiCorpAPTListRepairPreflight(
 		return result
 	}
 
-	if err := validateHashiCorpAPTListRepairDoctorBinding(request, report); err != nil {
+	if err := validateHashiCorpAPTListRepairDoctorBinding(
+		request,
+		probe.Keyring,
+		report,
+	); err != nil {
 		result.Reason = err.Error()
 		return result
 	}
@@ -203,8 +207,33 @@ func validateHashiCorpAPTListRepairPreflightFile(
 	return nil
 }
 
+func validateHashiCorpAPTListRepairDoctorKeyringPairing(
+	checks []APTListDoctorCheck,
+	keyringState HashiCorpAPTListRepairPreflightFileState,
+) error {
+	want := APTListDoctorStatusReady
+	if keyringState == HashiCorpAPTListRepairPreflightFileMissing {
+		want = APTListDoctorStatusBlocked
+	}
+
+	if err := requireExactlyOneAPTListDoctorCheck(
+		checks,
+		"remote_keyring_file",
+		want,
+	); err != nil {
+		return fmt.Errorf(
+			"Doctor keyring state %q does not match preflight keyring state: %w",
+			keyringState,
+			err,
+		)
+	}
+
+	return nil
+}
+
 func validateHashiCorpAPTListRepairDoctorBinding(
 	request HashiCorpAPTListRepairExecutionRequest,
+	keyring HashiCorpAPTListRepairPreflightFile,
 	report APTListDoctorReport,
 ) error {
 	if report.Overall != APTListDoctorStatusBlocked {
@@ -284,10 +313,9 @@ func validateHashiCorpAPTListRepairDoctorBinding(
 		)
 	}
 
-	if err := requireExactlyOneAPTListDoctorCheck(
+	if err := validateHashiCorpAPTListRepairDoctorKeyringPairing(
 		report.Checks,
-		"remote_keyring_file",
-		APTListDoctorStatusReady,
+		keyring.State,
 	); err != nil {
 		return fmt.Errorf(
 			"HashiCorp APT-list repair preflight blocked: %w",
