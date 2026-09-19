@@ -80,6 +80,18 @@ func runSelectedAPTListDoctorRemoteFlow(
 		return
 	}
 
+	preview := repohealer.PreviewBlockedHashiCorpAPTListRepair(
+		doctorResult.Report,
+	)
+	fmt.Println("\n" + repohealer.FormatAPTListRepairPreview(preview))
+
+	fmt.Println(
+		Yellow +
+			"[SAFE MODE] Preview is read-only and does not request approval or apply a repair. " +
+			repohealer.APTListRepairPreviewSafetyNotice +
+			Reset,
+	)
+
 	fmt.Println(
 		Yellow +
 			"[SAFE MODE] Remote HashiCorp APT-list Doctor completed read-only checks. No system changes were made." +
