@@ -89,3 +89,52 @@ func TestRunSelectedAPTListDoctorRemoteFlowRemainsReadOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestRunSelectedAPTListDoctorRemoteFlowDisplaysOnlyReadOnlyRepairPreview(
+	t *testing.T,
+) {
+	source, err := os.ReadFile("repo_healer_apt_list_doctor_flow.go")
+	if err != nil {
+		t.Fatalf("os.ReadFile() error = %v", err)
+	}
+
+	code := string(source)
+
+	for _, required := range []string{
+		"repohealer.PreviewBlockedHashiCorpAPTListRepair(",
+		"repohealer.FormatAPTListRepairPreview(",
+		"doctorResult.Report",
+		"APTListRepairPreviewSafetyNotice",
+	} {
+		if !strings.Contains(code, required) {
+			t.Fatalf(
+				"APT-list Doctor flow must compose the required read-only preview behavior %q",
+				required,
+			)
+		}
+	}
+
+	for _, forbidden := range []string{
+		"ApproveAndApplyDeb822Repair(",
+		"ApproveAndApplyAPTRepair(",
+		"ApplyDeb822RepairExecution(",
+		"ApplyAPTRepair(",
+		"CreateAPTFileSnapshot(",
+		"AppendRepairAuditEvent(",
+		"AppendDeb822RepairAuditEvent(",
+		"AppendDeb822RepairPreviewAuditEvent(",
+		"apt-get update",
+		"apt-get install",
+		"curl ",
+		"wget ",
+		"gpg --dearmor",
+		"gpg --import",
+	} {
+		if strings.Contains(code, forbidden) {
+			t.Fatalf(
+				"APT-list preview flow must remain read-only; found %q",
+				forbidden,
+			)
+		}
+	}
+}
