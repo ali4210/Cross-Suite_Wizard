@@ -19,6 +19,20 @@ func readyHashiCorpAPTListRepairPreflightProbeOutput() string {
 	}, "\n")
 }
 
+func readyHashiCorpAPTListRepairPreflightProbeOutputWithPresentKeyring() string {
+	return strings.Join([]string{
+		"VERSION|1",
+		"TOOL|apt-get|1",
+		"TOOL|gpg|1",
+		"TOOL|install|1",
+		"TOOL|mv|1",
+		"TOOL|sha256sum|1",
+		"FILE|source|present|0|644|126|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"FILE|keyring|present|0|644|1213|bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"LOCK|apt_dpkg|0",
+	}, "\n")
+}
+
 func TestParseHashiCorpAPTListRepairPreflightProbeOutputAcceptsSafeProbe(
 	t *testing.T,
 ) {
