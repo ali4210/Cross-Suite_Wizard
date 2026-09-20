@@ -8,7 +8,9 @@ chcp 65001 >nul
 net session >nul 2>&1
 if %errorlevel% neq 0 (
     echo Requesting administrative privileges...
-    powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs -ArgumentList '%*' -WorkingDirectory '%~dp0'"
+    set "ELEV_ARGS="
+    for %%A in (%*) do set "ELEV_ARGS=!ELEV_ARGS! ""%%~A"""
+    powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs -ArgumentList '!ELEV_ARGS!' -WorkingDirectory '%~dp0'"
     exit /b
 )
 

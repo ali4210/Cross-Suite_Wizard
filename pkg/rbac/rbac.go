@@ -5,23 +5,105 @@ import (
 	"crypto/rand"
 	"crypto/sha512"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf16"
 
 	"cross-ssh/pkg/common"
+
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/term"
 )
 
 var localSudoPassword string
 var currentHostAlias string
+
+// ====================================================================
+//  WINDOWS / POWERSHELL EXECUTION LAYER
+//  - sends scripts with -EncodedCommand (immune to cmd.exe / outer-PowerShell
+//    quoting and $variable expansion, which silently broke every inline
+//    `powershell -Command "..."` string)
+//  - detects real failures via a sentinel instead of assuming success
+// ====================================================================
+
+const psPrefix = `powershell -Command "`
+
+var psMutating = regexp.MustCompile(`\b(New|Set|Add|Remove|Enable|Disable|Rename)-[A-Za-z]`)
+
+func psEncode(script string) string {
+	u := utf16.Encode([]rune(script))
+	buf := make([]byte, len(u)*2)
+	for i, c := range u {
+		binary.LittleEndian.PutUint16(buf[i*2:], c)
+	}
+	return base64.StdEncoding.EncodeToString(buf)
+}
+
+// psExec runs a raw PowerShell script. State-changing scripts run with
+// ErrorActionPreference=Stop and must reach the PS_OK sentinel to count as success.
+func psExec(client *ssh.Client, script string) (string, error) {
+	stop := psMutating.MatchString(script)
+	pref := "Continue"
+	if stop {
+		pref = "Stop"
+	}
+	wrapped := "$ErrorActionPreference='" + pref + "'; $ProgressPreference='SilentlyContinue'; try { " +
+		script + "\n; Write-Output 'PS_OK' } catch { Write-Output ('PS_ERR: ' + $_.Exception.Message); exit 1 }"
+	cmd := psBuildCommand(wrapped)
+	out, err := common.ExecuteRemoteCommand(client, cmd, common.DefaultCmdTimeout)
+	cleaned := strings.TrimSpace(strings.ReplaceAll(out, "PS_OK", ""))
+
+	if stop && !strings.Contains(out, "PS_OK") {
+		msg := strings.TrimSpace(out)
+		if i := strings.Index(msg, "PS_ERR:"); i >= 0 {
+			msg = strings.TrimSpace(msg[i+len("PS_ERR:"):])
+		}
+		if msg == "" && err != nil {
+			msg = err.Error()
+		}
+		fmt.Println(common.Red + "[!] Windows command failed: " + msg + common.Reset)
+		low := strings.ToLower(msg)
+		if strings.Contains(low, "access") || strings.Contains(low, "denied") ||
+			strings.Contains(low, "privilege") || strings.Contains(low, "administrator") {
+			fmt.Println(common.Yellow + "=> The SSH session is probably NOT elevated (UAC token filtering). See the fix shown when Hub 7 opens." + common.Reset)
+		}
+		return cleaned, fmt.Errorf("powershell failed: %s", msg)
+	}
+	return cleaned, err
+}
+
+// execRemote is a drop-in for common.ExecuteRemoteCommand: legacy
+// `powershell -Command "..."` strings are unwrapped and re-sent encoded.
+func execRemote(client *ssh.Client, cmd string) (string, error) {
+	t := strings.TrimSpace(cmd)
+	if strings.HasPrefix(t, psPrefix) && strings.HasSuffix(t, `"`) {
+		script := strings.TrimSuffix(strings.TrimPrefix(t, psPrefix), `"`)
+		return psExec(client, script)
+	}
+	return common.ExecuteRemoteCommand(client, cmd, common.DefaultCmdTimeout)
+}
+
+func checkWindowsElevation(client *ssh.Client) {
+	out, _ := psExec(client, `([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)`)
+	if strings.Contains(strings.ToLower(out), "true") {
+		return
+	}
+	fmt.Println(common.Red + common.Bold + "[!] This SSH session is NOT running elevated on the Windows target." + common.Reset)
+	fmt.Println(common.Yellow + "    Firewall, user, group and DNS changes will be refused. Fix on the Windows host (Admin PowerShell), then restart sshd:" + common.Reset)
+	fmt.Println(`    New-ItemProperty -Path HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System -Name LocalAccountTokenFilterPolicy -Value 1 -PropertyType DWord -Force`)
+	fmt.Println(`    Restart-Service sshd`)
+	fmt.Println(common.Yellow + "    (or SSH in as the built-in Administrator account). Only do this on machines you control." + common.Reset)
+	common.PausePrompt()
+}
 
 const rbacTierRegistry = "/etc/cross_rbac_tiers.txt"
 
@@ -68,13 +150,13 @@ type ProvisionPayload struct {
 // ====================================================================
 
 var portPresets = map[string][]string{
-	"🌐 Web":       {"80", "443", "8080", "8443"},
-	"🗄️  Database":  {"3306", "5432", "27017", "6379", "1433", "1521"},
-	"🔑 SSH":       {"22"},
+	"🌐 Web":          {"80", "443", "8080", "8443"},
+	"🗄️  Database":   {"3306", "5432", "27017", "6379", "1433", "1521"},
+	"🔑 SSH":          {"22"},
 	"☸️  Kubernetes": {"6443", "10250", "10255"},
-	"🐳 Docker":    {"2375", "2376"},
-	"📊 Monitoring": {"9090", "9100", "3000"},
-	"📦 Others":    {"25", "53", "123", "161", "389", "636", "1194", "3389", "5900", "5901"},
+	"🐳 Docker":       {"2375", "2376"},
+	"📊 Monitoring":   {"9090", "9100", "3000"},
+	"📦 Others":       {"25", "53", "123", "161", "389", "636", "1194", "3389", "5900", "5901"},
 }
 
 // ====================================================================
@@ -111,13 +193,30 @@ func managePortAccessControl(reader *bufio.Reader, client *ssh.Client) {
 
 	sig := fetchHostSignature(client)
 
+	if sig.OS == "windows" {
+		if out, err := psExec(client, `(Get-NetFirewallProfile -Name Private).Enabled.ToString() + ',' + (Get-NetFirewallProfile -Name Public).Enabled.ToString() + ',' + (Get-NetFirewallProfile -Name Domain).Enabled.ToString()`); err == nil {
+			parts := strings.Split(strings.TrimSpace(out), ",")
+			if len(parts) == 3 && (parts[0] == "False" || parts[1] == "False" || parts[2] == "False") {
+				fmt.Println(common.Red + common.Bold + "[!] WARNING: One or more Windows Firewall profiles are DISABLED." + common.Reset)
+				fmt.Println(common.Yellow + "    Port rules will be created but WILL NOT be enforced until all profiles are enabled." + common.Reset)
+				fmt.Print(common.Yellow + "    Enable all firewall profiles now? (y/N): " + common.Reset)
+				ans, _ := reader.ReadString('\n')
+				if strings.ToLower(strings.TrimSpace(ans)) == "y" {
+					if _, e := psExec(client, `Set-NetFirewallProfile -Profile Domain,Private,Public -Enabled True`); e == nil {
+						fmt.Println(common.Green + "    ✔ All firewall profiles enabled." + common.Reset)
+					}
+				}
+			}
+		}
+	}
+
 	// Fetch UID (POSIX) or SID/Username (Windows)
 	var uid string
 	if sig.OS == "windows" {
 		uid = username
 	} else {
 		uidCmd := fmt.Sprintf("id -u %s 2>/dev/null", username)
-		uidOut, _ := common.ExecuteRemoteCommand(client, uidCmd, common.DefaultCmdTimeout)
+		uidOut, _ := execRemote(client, uidCmd)
 		uid = strings.TrimSpace(uidOut)
 		if uid == "" {
 			fmt.Println(common.Red + "[!] Could not determine UID for user." + common.Reset)
@@ -142,7 +241,7 @@ func managePortAccessControl(reader *bufio.Reader, client *ssh.Client) {
 		} else {
 			listenCmd = "ss -tulpn 2>/dev/null | grep LISTEN"
 		}
-		listenOut, _ := common.ExecuteRemoteCommand(client, listenCmd, common.DefaultCmdTimeout)
+		listenOut, _ := execRemote(client, listenCmd)
 		if listenOut != "" {
 			fmt.Println(common.Yellow + listenOut + common.Reset)
 		} else {
@@ -152,15 +251,23 @@ func managePortAccessControl(reader *bufio.Reader, client *ssh.Client) {
 		// Show current rules for this user
 		fmt.Println(common.Cyan + "\n🛡️  Current firewall OUTPUT/Egress rules for user [" + username + "]:" + common.Reset)
 		if sig.OS == "windows" {
-			winRulesCmd := fmt.Sprintf(`powershell -Command "Get-NetFirewallRule -DisplayName 'cross_%s_*' 2>$null | Select-Object DisplayName, Action, Direction | Format-Table -HideTableHeaders"`, username)
-			winRulesOut, _ := common.ExecuteRemoteCommand(client, winRulesCmd, common.DefaultCmdTimeout)
+			winRulesScript := fmt.Sprintf(`Get-NetFirewallRule -DisplayName 'cross_%s_*' -ErrorAction SilentlyContinue | ForEach-Object { $p = @(($_ | Get-NetFirewallPortFilter).RemotePort) -join ','; if(-not $p){ $p = 'Any' }; '{0,-26} {1,-6} {2,-9} [{3}]' -f $_.DisplayName, $_.Action, $_.Direction, $p }`, username)
+			winRulesOut, _ := psExec(client, winRulesScript)
 			if strings.TrimSpace(winRulesOut) != "" {
 				fmt.Println(common.Yellow + winRulesOut + common.Reset)
 			} else {
 				fmt.Println(common.Green + "  No Windows Firewall rules found for this user." + common.Reset)
 			}
+			allowed := winAllowedPorts(client, username)
+			fmt.Println(common.Cyan + "\n🔓 Allowed (carved-out) egress ports for [" + username + "]:" + common.Reset)
+			if len(allowed) == 0 {
+				fmt.Println(common.Yellow + "  (none — user is unrestricted or fully blocked)" + common.Reset)
+			} else {
+				fmt.Println(common.Green + common.Bold + "  " + strings.Join(allowed, ", ") + common.Reset)
+			}
+			fmt.Println(common.Yellow + "  (Note: these are OUTBOUND remote ports, not the listening ports above.)" + common.Reset)
 		} else if sig.OS == "darwin" {
-			pfRulesOut, _ := common.ExecuteRemoteCommand(client, wrapSudo("pfctl -a cross_access -sr 2>/dev/null"), common.DefaultCmdTimeout)
+			pfRulesOut, _ := execRemote(client, wrapSudo("pfctl -a cross_access -sr 2>/dev/null"))
 			if strings.TrimSpace(pfRulesOut) != "" {
 				fmt.Println(common.Yellow + pfRulesOut + common.Reset)
 			} else {
@@ -185,7 +292,7 @@ if not found:
     print('EMPTY')
 "
 `, username)
-			rulesOut, _ := common.ExecuteRemoteCommand(client, wrapSudo(rulesCmd), common.DefaultCmdTimeout)
+			rulesOut, _ := execRemote(client, wrapSudo(rulesCmd))
 			if rulesOut != "" && !strings.Contains(rulesOut, "EMPTY") {
 				lines := strings.Split(strings.TrimSpace(rulesOut), "\n")
 				for _, l := range lines {
@@ -344,8 +451,11 @@ func removePortRule(reader *bufio.Reader, client *ssh.Client, username, uid stri
 func getUserAllowedPorts(client *ssh.Client, username, uid string) []string {
 	sig := fetchHostSignature(client)
 	if sig.OS == "windows" {
-		cmd := fmt.Sprintf(`powershell -Command "$rules = Get-NetFirewallRule -DisplayName 'cross_%s_*' 2>$null; $ports = @(); foreach($r in $rules){ $p = (Get-NetFirewallPortFilter -AssociatedNetFirewallRule $r).LocalPort; if($p){ $ports += $p } else { $ports += 'ALL-PORTS' } }; $ports -join ','"`, username)
-		out, _ := common.ExecuteRemoteCommand(client, cmd, common.DefaultCmdTimeout)
+		return winAllowedPorts(client, username)
+	}
+	if sig.OS == "windows" {
+		cmd := fmt.Sprintf(`powershell -Command "$rules = Get-NetFirewallRule -DisplayName 'cross_%s_*' 2>$null; $ports = @(); foreach($r in $rules){ $p = (Get-NetFirewallPortFilter -AssociatedNetFirewallRule $r).RemotePort; if($p -and $p -ne 'Any'){ $ports += $p } else { $ports += 'ALL-PORTS' } }; $ports -join ','"`, username)
+		out, _ := execRemote(client, cmd)
 		if strings.TrimSpace(out) == "" {
 			return []string{}
 		}
@@ -353,7 +463,7 @@ func getUserAllowedPorts(client *ssh.Client, username, uid string) []string {
 	}
 
 	if sig.OS == "darwin" {
-		out, _ := common.ExecuteRemoteCommand(client, wrapSudo("pfctl -a cross_access -sr 2>/dev/null"), common.DefaultCmdTimeout)
+		out, _ := execRemote(client, wrapSudo("pfctl -a cross_access -sr 2>/dev/null"))
 		var ports []string
 		for _, l := range strings.Split(out, "\n") {
 			if strings.Contains(l, "port") {
@@ -385,7 +495,7 @@ for line in proc.stdout.splitlines():
 print(','.join(ports))
 "
 `, uid)
-	out, _ := common.ExecuteRemoteCommand(client, wrapSudo(cmd), common.DefaultCmdTimeout)
+	out, _ := execRemote(client, wrapSudo(cmd))
 	if out == "" {
 		return []string{}
 	}
@@ -416,25 +526,33 @@ func isNumeric(s string) bool {
 func applyPortRule(client *ssh.Client, username, uid, port, action string) {
 	fmt.Println(common.Cyan + "[+] Applying rule..." + common.Reset)
 	sig := fetchHostSignature(client)
+	if sig.OS == "windows" {
+		winApplyPortRule(client, username, port, action)
+		return
+	}
 
 	if sig.OS == "windows" {
 		switch action {
 		case "add":
-			cmd := fmt.Sprintf(`powershell -Command "New-NetFirewallRule -DisplayName 'cross_%s_%s' -Direction Outbound -LocalPort %s -Protocol TCP -Action Allow"`, username, port, port)
-			common.ExecuteRemoteCommand(client, cmd, common.DefaultCmdTimeout)
-			fmt.Printf(common.Green+"[✔] Windows Firewall: Port %s allowed for user %s.\n"+common.Reset, port, username)
+			cmd := fmt.Sprintf(`powershell -Command "$sid = (New-Object System.Security.Principal.NTAccount('%s')).Translate([System.Security.Principal.SecurityIdentifier]).Value; Remove-NetFirewallRule -DisplayName 'cross_%s_%s' -ErrorAction SilentlyContinue; New-NetFirewallRule -DisplayName 'cross_%s_%s' -Direction Outbound -RemotePort %s -Protocol TCP -Action Allow -LocalUser ('D:(A;;CC;;;' + $sid + ')') | Out-Null"`, username, username, port, username, port, port)
+			if _, psErr := execRemote(client, cmd); psErr == nil {
+				fmt.Printf(common.Green+"[✔] Windows Firewall: Port %s allowed for user %s.\n"+common.Reset, port, username)
+			}
 		case "add-all":
-			cmd := fmt.Sprintf(`powershell -Command "New-NetFirewallRule -DisplayName 'cross_%s_all' -Direction Outbound -Protocol Any -Action Allow"`, username)
-			common.ExecuteRemoteCommand(client, cmd, common.DefaultCmdTimeout)
-			fmt.Printf(common.Green+"[✔] Windows Firewall: ALL traffic allowed for user %s.\n"+common.Reset, username)
+			cmd := fmt.Sprintf(`powershell -Command "$sid = (New-Object System.Security.Principal.NTAccount('%s')).Translate([System.Security.Principal.SecurityIdentifier]).Value; Remove-NetFirewallRule -DisplayName 'cross_%s_all' -ErrorAction SilentlyContinue; New-NetFirewallRule -DisplayName 'cross_%s_all' -Direction Outbound -Protocol Any -Action Allow -LocalUser ('D:(A;;CC;;;' + $sid + ')') | Out-Null"`, username, username, username)
+			if _, psErr := execRemote(client, cmd); psErr == nil {
+				fmt.Printf(common.Green+"[✔] Windows Firewall: ALL traffic allowed for user %s.\n"+common.Reset, username)
+			}
 		case "remove":
 			cmd := fmt.Sprintf(`powershell -Command "Remove-NetFirewallRule -DisplayName 'cross_%s_%s' -ErrorAction SilentlyContinue"`, username, port)
-			common.ExecuteRemoteCommand(client, cmd, common.DefaultCmdTimeout)
-			fmt.Printf(common.Green+"[✔] Windows Firewall: Port %s rule removed for user %s.\n"+common.Reset, port, username)
+			if _, psErr := execRemote(client, cmd); psErr == nil {
+				fmt.Printf(common.Green+"[✔] Windows Firewall: Port %s rule removed for user %s.\n"+common.Reset, port, username)
+			}
 		case "remove-blanket", "remove-all":
 			cmd := fmt.Sprintf(`powershell -Command "Remove-NetFirewallRule -DisplayName 'cross_%s_*' -ErrorAction SilentlyContinue"`, username)
-			common.ExecuteRemoteCommand(client, cmd, common.DefaultCmdTimeout)
-			fmt.Printf(common.Green+"[✔] Windows Firewall: ALL rules removed for user %s.\n"+common.Reset, username)
+			if _, psErr := execRemote(client, cmd); psErr == nil {
+				fmt.Printf(common.Green+"[✔] Windows Firewall: ALL rules removed for user %s.\n"+common.Reset, username)
+			}
 		}
 		return
 	}
@@ -561,7 +679,7 @@ print('ALL_REMOVED')
 `, username)
 	}
 
-	out, err := common.ExecuteRemoteCommand(client, wrapSudo(script), common.DefaultCmdTimeout)
+	out, err := execRemote(client, wrapSudo(script))
 	if err == nil {
 		switch {
 		case action == "add" && strings.Contains(out, "PORT_ALLOW_ADDED"):
@@ -641,7 +759,7 @@ print('AUTH_FAIL')
 sys.exit(1)
 " 2>/dev/null`, escaped)
 
-		outValidate, errValidate := common.ExecuteRemoteCommand(client, validateCmd, common.DefaultCmdTimeout)
+		outValidate, errValidate := execRemote(client, validateCmd)
 
 		if errValidate == nil && strings.Contains(outValidate, "AUTH_OK") {
 			localSudoPassword = pass
@@ -651,7 +769,7 @@ sys.exit(1)
 
 		// Fallback for macOS standard sudo check
 		macSudoCheck := fmt.Sprintf("printf '%%s\\n' '%s' | sudo -S -k true 2>/dev/null && echo 'AUTH_OK'", escaped)
-		outMac, errMac := common.ExecuteRemoteCommand(client, macSudoCheck, common.DefaultCmdTimeout)
+		outMac, errMac := execRemote(client, macSudoCheck)
 		if errMac == nil && strings.Contains(outMac, "AUTH_OK") {
 			localSudoPassword = pass
 			fmt.Println(common.Green + "=> Elevation credentials verified successfully (POSIX Sudo)!" + common.Reset)
@@ -711,7 +829,20 @@ func validateComplexPassword(pass string) bool {
 	return hasUpper && hasLower && hasDigit && hasSpecial
 }
 
+var hostSigCache = map[*ssh.Client]HostSignature{}
+
 func fetchHostSignature(client *ssh.Client) HostSignature {
+	if s, ok := hostSigCache[client]; ok {
+		return s
+	}
+	s := fetchHostSignatureUncached(client)
+	if s.OS != "unknown" {
+		hostSigCache[client] = s
+	}
+	return s
+}
+
+func fetchHostSignatureUncached(client *ssh.Client) HostSignature {
 	checkCmd := `
 if [ -f /etc/os-release ]; then
     DISTRO=$(grep -oP '(?<=^PRETTY_NAME=").+(?=")' /etc/os-release 2>/dev/null)
@@ -731,10 +862,11 @@ else
     echo "probe_windows"
 fi
 `
-	out, err := common.ExecuteRemoteCommand(client, checkCmd, common.DefaultCmdTimeout)
-	if err != nil || strings.Contains(out, "probe_windows") || strings.TrimSpace(out) == "" {
-		winCmd := `powershell -Command "$os = (Get-CimInstance Win32_OperatingSystem).Caption; $ver = [System.Environment]::OSVersion.Version.ToString(); $h = $env:COMPUTERNAME; $ip = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.InterfaceAlias -notmatch 'Loopback'}).IPAddress[0]; Write-Output ('windows|' + $os + '|' + $ver + '|' + $h + '|' + $ip)"`
-		winOut, winErr := common.ExecuteRemoteCommand(client, winCmd, common.DefaultCmdTimeout)
+	out, err := execRemote(client, checkCmd)
+	if err != nil || strings.Contains(out, "probe_windows") || strings.TrimSpace(out) == "" ||
+		!(strings.HasPrefix(strings.TrimSpace(out), "linux|") || strings.HasPrefix(strings.TrimSpace(out), "darwin|")) {
+		winCmd := `powershell -Command "$os = (Get-CimInstance Win32_OperatingSystem).Caption; $ver = [System.Environment]::OSVersion.Version.ToString(); $h = $env:COMPUTERNAME; $ip = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.InterfaceAlias -notmatch 'Loopback'} | Select-Object -First 1 -ExpandProperty IPAddress); Write-Output ('windows|' + $os + '|' + $ver + '|' + $h + '|' + $ip)"`
+		winOut, winErr := execRemote(client, winCmd)
 		if winErr == nil && strings.Contains(winOut, "windows|") {
 			parts := strings.Split(strings.TrimSpace(winOut), "|")
 			return HostSignature{OS: "windows", Distro: parts[1], Kernel: parts[2], Hostname: parts[3], PrimaryIP: parts[4]}
@@ -758,12 +890,15 @@ func renderHostBanner(sig HostSignature) {
 
 func fetchSystemUsers(client *ssh.Client) []UserSummary {
 	sig := fetchHostSignature(client)
+	if sig.OS == "windows" {
+		return winFetchUsers(client, sig)
+	}
 	var users []UserSummary
 	idx := 1
 
 	if sig.OS == "windows" {
-		psCmd := `powershell -Command "Get-LocalUser | Select-Object Name, SID, Enabled, Description | ForEach-Object { $_.Name + '|' + $_.SID.Value + '|' + (if($_.Enabled){'ACTIVE'}else{'LOCKED'}) + '|Standard User' }"`
-		out, _ := common.ExecuteRemoteCommand(client, psCmd, common.DefaultCmdTimeout)
+		psCmd := `powershell -Command "$admins = @(Get-LocalGroupMember -Group 'Administrators' -ErrorAction SilentlyContinue | ForEach-Object { $_.Name.Split('\')[-1] }); Get-LocalUser | ForEach-Object { $t = if($admins -contains $_.Name){'Super-Admin'}else{'Standard User'}; $s = if($_.Enabled){'ACTIVE'}else{'LOCKED'}; $_.Name + '|' + $_.SID.Value + '|' + $s + '|' + $t }"`
+		out, _ := execRemote(client, psCmd)
 		for _, l := range strings.Split(strings.TrimSpace(out), "\n") {
 			parts := strings.Split(strings.TrimSpace(l), "|")
 			if len(parts) >= 4 {
@@ -787,7 +922,7 @@ func fetchSystemUsers(client *ssh.Client) []UserSummary {
 
 	if sig.OS == "darwin" {
 		dsclCmd := `dscl . -list /Users UniqueID | awk '$2 >= 500 {print $1 "|" $2 "|Unassigned|Dhaka, BD|/bin/zsh|ACTIVE|Standard User|SYSTEM"}'`
-		out, _ := common.ExecuteRemoteCommand(client, wrapSudo(dsclCmd), common.DefaultCmdTimeout)
+		out, _ := execRemote(client, wrapSudo(dsclCmd))
 		for _, l := range strings.Split(strings.TrimSpace(out), "\n") {
 			parts := strings.Split(strings.TrimSpace(l), "|")
 			if len(parts) >= 8 {
@@ -1004,11 +1139,11 @@ for p in pwd.getpwall():
 	b64Py := base64.StdEncoding.EncodeToString([]byte(scriptPython))
 	execCmd := fmt.Sprintf("python3 -c \"import base64; exec(base64.b64decode('%s').decode('utf-8'))\"", b64Py)
 
-	out, err := common.ExecuteRemoteCommand(client, wrapSudo(execCmd), common.DefaultCmdTimeout)
+	out, err := execRemote(client, wrapSudo(execCmd))
 
 	if err != nil || strings.TrimSpace(out) == "" {
 		hostIPCmd := "ip -o -4 addr show | awk '!/lo/ {print $4; exit}' | cut -d/ -f1"
-		hip, _ := common.ExecuteRemoteCommand(client, hostIPCmd, common.DefaultCmdTimeout)
+		hip, _ := execRemote(client, hostIPCmd)
 		hip = strings.TrimSpace(hip)
 		if hip == "" {
 			hip = "192.168.0.150"
@@ -1045,7 +1180,7 @@ BEGIN {
     print $1 "|" $3 "|" u_ip "|Dhaka, BD|" shell "|" st "|" tier "|SYSTEM"
 }' /etc/passwd
 `, hip, rbacTierRegistry)
-		out, _ = common.ExecuteRemoteCommand(client, wrapSudo(fallbackCmd), common.DefaultCmdTimeout)
+		out, _ = execRemote(client, wrapSudo(fallbackCmd))
 	}
 
 	for _, l := range strings.Split(strings.TrimSpace(out), "\n") {
@@ -1172,7 +1307,7 @@ func fetchActiveNetworkInterfaces(client *ssh.Client) []NetworkInterface {
 
 	if sig.OS == "windows" {
 		cmd := `powershell -Command "Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.InterfaceAlias -notmatch 'Loopback'} | ForEach-Object { $_.InterfaceAlias + ':' + $_.IPAddress + '/' + $_.PrefixLength }"`
-		out, _ := common.ExecuteRemoteCommand(client, cmd, common.DefaultCmdTimeout)
+		out, _ := execRemote(client, cmd)
 		for _, l := range strings.Split(strings.TrimSpace(out), "\n") {
 			l = strings.TrimSpace(l)
 			if strings.Contains(l, ":") {
@@ -1185,11 +1320,11 @@ func fetchActiveNetworkInterfaces(client *ssh.Client) []NetworkInterface {
 
 	if sig.OS == "darwin" {
 		cmd := "ifconfig -l"
-		out, _ := common.ExecuteRemoteCommand(client, cmd, common.DefaultCmdTimeout)
+		out, _ := execRemote(client, cmd)
 		for _, ifName := range strings.Fields(strings.TrimSpace(out)) {
 			if ifName != "lo0" {
 				ipCmd := fmt.Sprintf("ipconfig getifaddr %s 2>/dev/null", ifName)
-				ipOut, _ := common.ExecuteRemoteCommand(client, ipCmd, common.DefaultCmdTimeout)
+				ipOut, _ := execRemote(client, ipCmd)
 				ipOut = strings.TrimSpace(ipOut)
 				if ipOut != "" {
 					ifaces = append(ifaces, NetworkInterface{Name: ifName, IP: ipOut + "/24"})
@@ -1200,7 +1335,7 @@ func fetchActiveNetworkInterfaces(client *ssh.Client) []NetworkInterface {
 	}
 
 	cmd := "ip -o -4 addr show | awk '{print $2 \":\" $4}'"
-	out, _ := common.ExecuteRemoteCommand(client, cmd, common.DefaultCmdTimeout)
+	out, _ := execRemote(client, cmd)
 
 	for _, l := range strings.Split(strings.TrimSpace(out), "\n") {
 		parts := strings.Split(l, ":")
@@ -1222,6 +1357,9 @@ func ShowRBACMenu(reader *bufio.Reader, client *ssh.Client, host string) {
 	}
 
 	currentHostAlias = host
+	if fetchHostSignature(client).OS == "windows" {
+		checkWindowsElevation(client)
+	}
 
 	for {
 		fmt.Print("\033[H\033[2J")
@@ -1429,8 +1567,22 @@ func provisionNewIdentity(reader *bufio.Reader, client *ssh.Client) {
 	fmt.Println(common.Cyan + "[+] Provisioning identity on remote host (" + sig.OS + ")..." + common.Reset)
 
 	if sig.OS == "windows" {
-		winCmd := fmt.Sprintf(`powershell -Command "$sec = ConvertTo-SecureString '%s' -AsPlainText -Force; New-LocalUser -Name '%s' -Password $sec -PasswordNeverExpires:$true"`, password, username)
-		_, err := common.ExecuteRemoteCommand(client, winCmd, common.DefaultCmdTimeout)
+		psPass := strings.ReplaceAll(password, "'", "''")
+		neverExp := "$true"
+		if maxDays > 0 {
+			neverExp = "$false"
+		}
+		winScript := fmt.Sprintf("$sec = ConvertTo-SecureString '%s' -AsPlainText -Force; New-LocalUser -Name '%s' -Password $sec -PasswordNeverExpires:%s -ErrorAction Stop | Out-Null; Add-LocalGroupMember -Group 'Users' -Member '%s' -ErrorAction SilentlyContinue", psPass, username, neverExp, username)
+		if forceExpire == "y" {
+			winScript += fmt.Sprintf("; net user '%s' /logonpasswordchg:yes | Out-Null", username)
+		}
+		if sshPubKey != "" {
+			psKey := strings.ReplaceAll(sshPubKey, "'", "''")
+			winScript += fmt.Sprintf("; $d = 'C:\\Users\\%s\\.ssh'; New-Item -ItemType Directory -Force -Path $d | Out-Null; Add-Content -Path ($d + '\\authorized_keys') -Value '%s'; icacls $d /inheritance:r /grant '%s:(OI)(CI)F' 'SYSTEM:(OI)(CI)F' | Out-Null", username, psKey, username)
+		}
+		winScript += winProvisionExtras(username, dedicatedIP, boundIface)
+		winCmd := `powershell -Command "` + winScript + `"`
+		_, err := execRemote(client, winCmd)
 		if err != nil {
 			fmt.Printf(common.Red+"[!] Windows provisioning error: %v\n"+common.Reset, err)
 		} else {
@@ -1442,7 +1594,7 @@ func provisionNewIdentity(reader *bufio.Reader, client *ssh.Client) {
 
 	if sig.OS == "darwin" {
 		macCmd := fmt.Sprintf(`sysadminctl -addUser "%s" -password "%s" -home "/Users/%s"`, username, password, username)
-		_, err := common.ExecuteRemoteCommand(client, wrapSudo(macCmd), common.DefaultCmdTimeout)
+		_, err := execRemote(client, wrapSudo(macCmd))
 		if err != nil {
 			fmt.Printf(common.Red+"[!] macOS provisioning error: %v\n"+common.Reset, err)
 		} else {
@@ -1623,7 +1775,7 @@ print('PROVISION_SUCCESS')
 	b64Python := base64.StdEncoding.EncodeToString([]byte(pythonScript))
 	remoteCmd := fmt.Sprintf("python3 -c \"import base64; exec(base64.b64decode('%s').decode('utf-8'))\"", b64Python)
 
-	out, err := common.ExecuteRemoteCommand(client, wrapSudo(remoteCmd), common.DefaultCmdTimeout)
+	out, err := execRemote(client, wrapSudo(remoteCmd))
 	if err != nil || !strings.Contains(out, "PROVISION_SUCCESS") {
 		fmt.Printf(common.Red+"[!] Provisioning error: %v\nOutput: %s\n"+common.Reset, err, out)
 	} else {
@@ -1635,7 +1787,7 @@ print('PROVISION_SUCCESS')
 
 		if autoGenerateDedicatedKey {
 			fetchPrivCmd := fmt.Sprintf("cat /home/%s/.ssh/id_ed25519", username)
-			privKeyData, privErr := common.ExecuteRemoteCommand(client, wrapSudo(fetchPrivCmd), common.DefaultCmdTimeout)
+			privKeyData, privErr := execRemote(client, wrapSudo(fetchPrivCmd))
 			if privErr == nil && strings.Contains(privKeyData, "PRIVATE KEY") {
 				home, _ := os.UserHomeDir()
 				localKeyFile := filepath.Join(home, ".ssh", fmt.Sprintf("%s_id_ed25519", username))
@@ -1682,14 +1834,22 @@ func manageUserRBACTiers(reader *bufio.Reader, client *ssh.Client) {
 	}
 
 	if sig.OS == "windows" {
+		winApplyTier(reader, client, username, tierChoice)
+		common.PausePrompt()
+		return
+	}
+
+	if sig.OS == "windows" {
 		if tierChoice == "1" {
 			winAdd := fmt.Sprintf(`powershell -Command "Add-LocalGroupMember -Group 'Administrators' -Member '%s'"`, username)
-			common.ExecuteRemoteCommand(client, winAdd, common.DefaultCmdTimeout)
-			fmt.Printf(common.Green+"✅ Success: User [%s] elevated to Windows Administrators Group!\n"+common.Reset, username)
+			if _, psErr := execRemote(client, winAdd); psErr == nil {
+				fmt.Printf(common.Green+"✅ Success: User [%s] elevated to Windows Administrators Group!\n"+common.Reset, username)
+			}
 		} else if tierChoice == "6" {
 			winRem := fmt.Sprintf(`powershell -Command "Remove-LocalGroupMember -Group 'Administrators' -Member '%s'"`, username)
-			common.ExecuteRemoteCommand(client, winRem, common.DefaultCmdTimeout)
-			fmt.Printf(common.Green+"✅ All elevated privileges revoked for user [%s]!\n"+common.Reset, username)
+			if _, psErr := execRemote(client, winRem); psErr == nil {
+				fmt.Printf(common.Green+"✅ All elevated privileges revoked for user [%s]!\n"+common.Reset, username)
+			}
 		} else {
 			fmt.Println(common.Yellow + "[!] Granular sudoers whitelisting is tailored for POSIX. User remains in standard group." + common.Reset)
 		}
@@ -1700,11 +1860,11 @@ func manageUserRBACTiers(reader *bufio.Reader, client *ssh.Client) {
 	if sig.OS == "darwin" {
 		if tierChoice == "1" {
 			macAdd := fmt.Sprintf("dseditgroup -o edit -a %s -t user admin", username)
-			common.ExecuteRemoteCommand(client, wrapSudo(macAdd), common.DefaultCmdTimeout)
+			execRemote(client, wrapSudo(macAdd))
 			fmt.Printf(common.Green+"✅ Success: User [%s] elevated to macOS Admin!\n"+common.Reset, username)
 		} else if tierChoice == "6" {
 			macRem := fmt.Sprintf("dseditgroup -o edit -d %s -t user admin", username)
-			common.ExecuteRemoteCommand(client, wrapSudo(macRem), common.DefaultCmdTimeout)
+			execRemote(client, wrapSudo(macRem))
 			fmt.Printf(common.Green+"✅ Privileges revoked for user [%s] on macOS!\n"+common.Reset, username)
 		} else {
 			fmt.Println(common.Yellow + "[!] Custom whitelists for macOS are applied via standard sudoers." + common.Reset)
@@ -1742,7 +1902,7 @@ func manageUserRBACTiers(reader *bufio.Reader, client *ssh.Client) {
 		sudoersContent = fmt.Sprintf("%s ALL=(ALL) %s", username, paths)
 	case "6":
 		revokeCmd := fmt.Sprintf("rm -f /etc/sudoers.d/cross_rbac_%s", username)
-		_, err := common.ExecuteRemoteCommand(client, wrapSudo(revokeCmd), common.DefaultCmdTimeout)
+		_, err := execRemote(client, wrapSudo(revokeCmd))
 
 		regCleanCmd := fmt.Sprintf(`python3 -c "
 import os
@@ -1753,7 +1913,7 @@ if os.path.exists(reg):
     with open(reg, 'w') as f:
         f.writelines(lines)
 "`, username, rbacTierRegistry)
-		common.ExecuteRemoteCommand(client, wrapSudo(regCleanCmd), common.DefaultCmdTimeout)
+		execRemote(client, wrapSudo(regCleanCmd))
 
 		if err == nil {
 			fmt.Println(common.Green + "✅ All elevated privileges revoked for user [" + username + "]!" + common.Reset)
@@ -1786,7 +1946,7 @@ fi
 `, username, username, sudoersContent)
 
 	fmt.Println(common.Cyan + "[+] Validating and applying RBAC rule atomically..." + common.Reset)
-	out, err := common.ExecuteRemoteCommand(client, wrapSudo(script), common.DefaultCmdTimeout)
+	out, err := execRemote(client, wrapSudo(script))
 
 	if err == nil && strings.Contains(out, "VISUDO_SUCCESS") {
 		regWriteCmd := fmt.Sprintf(`python3 -c "
@@ -1804,7 +1964,7 @@ with open(reg, 'w') as f:
     os.fsync(f.fileno())
 os.chmod(reg, 0o644)
 "`, username, tierName, rbacTierRegistry)
-		common.ExecuteRemoteCommand(client, wrapSudo(regWriteCmd), common.DefaultCmdTimeout)
+		execRemote(client, wrapSudo(regWriteCmd))
 
 		fmt.Printf(common.Green+"✅ Success: User [%s] elevated to Tier [%s]!\n"+common.Reset, username, tierName)
 	} else {
@@ -1852,11 +2012,17 @@ func assignIPAndVirtualInterface(reader *bufio.Reader, client *ssh.Client) {
 
 	sig := fetchHostSignature(client)
 
+	if sig.OS == "windows" {
+		winIPStack(reader, client, username, ifaces, mode)
+		return
+	}
+
 	if mode == "3" {
 		if sig.OS == "windows" {
 			psDel := `powershell -Command "Get-NetIPAddress | Where-Object {$_.InterfaceAlias -notmatch 'Loopback' -and $_.SkipAsSource -eq $true} | Remove-NetIPAddress -Confirm:$false"`
-			common.ExecuteRemoteCommand(client, psDel, common.DefaultCmdTimeout)
-			fmt.Printf(common.Green+"✅ Success: Stacked IP addresses purged on Windows host!\n"+common.Reset)
+			if _, psErr := execRemote(client, psDel); psErr == nil {
+				fmt.Printf(common.Green + "✅ Success: Stacked IP addresses purged on Windows host!\n" + common.Reset)
+			}
 			common.PausePrompt()
 			return
 		}
@@ -1887,7 +2053,7 @@ print('PURGE_IP_OK')
 "
 `, username)
 
-		out, err := common.ExecuteRemoteCommand(client, wrapSudo(purgeScript), common.DefaultCmdTimeout)
+		out, err := execRemote(client, wrapSudo(purgeScript))
 		if err == nil && strings.Contains(out, "PURGE_IP_OK") {
 			fmt.Printf(common.Green+"✅ Success: Assigned IP address for user [%s] has been unbound and purged!\n"+common.Reset, username)
 		} else {
@@ -1940,7 +2106,7 @@ print('PURGE_IP_OK')
 	if sig.OS == "windows" {
 		cleanIP := strings.Split(assignIP, "/")[0]
 		psAdd := fmt.Sprintf(`powershell -Command "New-NetIPAddress -InterfaceAlias '%s' -IPAddress '%s' -PrefixLength 24"`, selectedIface, cleanIP)
-		_, errWin := common.ExecuteRemoteCommand(client, psAdd, common.DefaultCmdTimeout)
+		_, errWin := execRemote(client, psAdd)
 		if errWin == nil {
 			fmt.Printf(common.Green+"✅ Success: Stacked IP [%s] assigned to Windows adapter [%s]!\n"+common.Reset, cleanIP, selectedIface)
 		}
@@ -1951,7 +2117,7 @@ print('PURGE_IP_OK')
 	if sig.OS == "darwin" {
 		cleanIP := strings.Split(assignIP, "/")[0]
 		macAdd := fmt.Sprintf("ifconfig %s alias %s netmask 255.255.255.0", selectedIface, cleanIP)
-		_, errMac := common.ExecuteRemoteCommand(client, wrapSudo(macAdd), common.DefaultCmdTimeout)
+		_, errMac := execRemote(client, wrapSudo(macAdd))
 		if errMac == nil {
 			fmt.Printf(common.Green+"✅ Success: Stacked IP [%s] aliased onto macOS [%s]!\n"+common.Reset, cleanIP, selectedIface)
 		}
@@ -1988,13 +2154,13 @@ echo "IP_PROVISION_OK"
 `, assignIP, selectedIface, username, username, assignIP, username, username, username)
 
 	fmt.Println(common.Cyan + "[+] Stacking pingable IP onto adapter and updating registry..." + common.Reset)
-	out, err := common.ExecuteRemoteCommand(client, wrapSudo(script), common.DefaultCmdTimeout)
+	out, err := execRemote(client, wrapSudo(script))
 
 	if err == nil && strings.Contains(out, "IP_PROVISION_OK") {
 		if ttlSeconds > 0 {
 			ttlCmd := fmt.Sprintf("systemd-run --unit=cross_ip_%s --on-active=%ds sh -c 'ip addr del %s dev %s 2>/dev/null; python3 -c \"import os; lines=[l for l in open(\\\"/etc/cross_assigned_ips.txt\\\") if not l.startswith(\\\"%s:\\\")]; open(\\\"/etc/cross_assigned_ips.txt\\\", \\\"w\\\").writelines(lines)\"; rm -f /etc/ssh/sshd_config.d/rbac_%s.conf && systemctl reload sshd'",
 				username, ttlSeconds, assignIP, selectedIface, username, username)
-			_, _ = common.ExecuteRemoteCommand(client, wrapSudo(ttlCmd), common.DefaultCmdTimeout)
+			_, _ = execRemote(client, wrapSudo(ttlCmd))
 			fmt.Printf(common.Green+"✅ Success: Ephemeral Pingable IP [%s] stacked for user [%s] on [%s] (TTL: %d seconds)!\n"+common.Reset, assignIP, username, selectedIface, ttlSeconds)
 		} else {
 			fmt.Printf(common.Green+"✅ Success: Permanent Pingable IP [%s] stacked cleanly for user [%s] on [%s]!\n"+common.Reset, assignIP, username, selectedIface)
@@ -2040,13 +2206,14 @@ func assignDNSResolverProfile(reader *bufio.Reader, client *ssh.Client) {
 
 	if dnsChoice == "6" {
 		if sig.OS == "windows" {
-			common.ExecuteRemoteCommand(client, `powershell -Command "Set-DnsClientServerAddress -InterfaceAlias (Get-NetAdapter | Where-Object Status -eq 'Up').Name -ResetServerAddresses"`, common.DefaultCmdTimeout)
-			fmt.Println(common.Green + "✅ Windows DNS reset to DHCP default." + common.Reset)
+			if _, psErr := execRemote(client, `powershell -Command "Set-DnsClientServerAddress -InterfaceAlias (Get-NetAdapter | Where-Object Status -eq 'Up').Name -ResetServerAddresses"`); psErr == nil {
+				fmt.Println(common.Green + "✅ Windows DNS reset to DHCP default." + common.Reset)
+			}
 			common.PausePrompt()
 			return
 		}
 		if sig.OS == "darwin" {
-			common.ExecuteRemoteCommand(client, wrapSudo("networksetup -setdnsservers Wi-Fi empty 2>/dev/null; networksetup -setdnsservers Ethernet empty 2>/dev/null"), common.DefaultCmdTimeout)
+			execRemote(client, wrapSudo("networksetup -setdnsservers Wi-Fi empty 2>/dev/null; networksetup -setdnsservers Ethernet empty 2>/dev/null"))
 			fmt.Println(common.Green + "✅ macOS DNS reset to DHCP default." + common.Reset)
 			common.PausePrompt()
 			return
@@ -2062,7 +2229,7 @@ if systemctl is-active systemd-resolved >/dev/null 2>&1; then
 fi
 echo "DNS_REVERT_OK"
 `
-		out, err := common.ExecuteRemoteCommand(client, wrapSudo(revertScript), common.DefaultCmdTimeout)
+		out, err := execRemote(client, wrapSudo(revertScript))
 		if err == nil && strings.Contains(out, "DNS_REVERT_OK") {
 			fmt.Println(common.Green + "✅ Custom DNS purged! System reverted to default network upstream resolvers." + common.Reset)
 		} else {
@@ -2109,15 +2276,16 @@ echo "DNS_REVERT_OK"
 
 	if sig.OS == "windows" {
 		winDNS := fmt.Sprintf(`powershell -Command "Set-DnsClientServerAddress -InterfaceAlias (Get-NetAdapter | Where-Object Status -eq 'Up').Name -ServerAddresses ('%s','%s')"`, primaryDNS, secondaryDNS)
-		common.ExecuteRemoteCommand(client, winDNS, common.DefaultCmdTimeout)
-		fmt.Printf(common.Green+"✅ Success: DNS Policy [%s (%s, %s)] assigned on Windows!\n"+common.Reset, dnsName, primaryDNS, secondaryDNS)
+		if _, psErr := execRemote(client, winDNS); psErr == nil {
+			fmt.Printf(common.Green+"✅ Success: DNS Policy [%s (%s, %s)] assigned on Windows!\n"+common.Reset, dnsName, primaryDNS, secondaryDNS)
+		}
 		common.PausePrompt()
 		return
 	}
 
 	if sig.OS == "darwin" {
 		macDNS := fmt.Sprintf("networksetup -setdnsservers Wi-Fi %s %s 2>/dev/null || networksetup -setdnsservers Ethernet %s %s 2>/dev/null", primaryDNS, secondaryDNS, primaryDNS, secondaryDNS)
-		common.ExecuteRemoteCommand(client, wrapSudo(macDNS), common.DefaultCmdTimeout)
+		execRemote(client, wrapSudo(macDNS))
 		fmt.Printf(common.Green+"✅ Success: DNS Policy [%s (%s, %s)] assigned on macOS!\n"+common.Reset, dnsName, primaryDNS, secondaryDNS)
 		common.PausePrompt()
 		return
@@ -2140,7 +2308,7 @@ echo "DNS_UPDATE_SUCCESS"
 `, primaryDNS, secondaryDNS, primaryDNS, secondaryDNS)
 
 	fmt.Println(common.Cyan + "[+] Enforcing DNS upstream configuration on remote system..." + common.Reset)
-	out, err := common.ExecuteRemoteCommand(client, wrapSudo(script), common.DefaultCmdTimeout)
+	out, err := execRemote(client, wrapSudo(script))
 
 	if err == nil && strings.Contains(out, "DNS_UPDATE_SUCCESS") {
 		fmt.Printf(common.Green+"✅ Success: DNS Policy [%s (%s, %s)] assigned to user [%s]!\n"+common.Reset, dnsName, primaryDNS, secondaryDNS, username)
@@ -2170,6 +2338,10 @@ func manageNetworkAndInternetConfinement(reader *bufio.Reader, client *ssh.Clien
 	}
 
 	sig := fetchHostSignature(client)
+	if sig.OS == "windows" {
+		winConfinement(reader, client, username)
+		return
+	}
 	if sig.OS != "linux" {
 		fmt.Println(common.Yellow + "[!] User network socket ownership confinement (UID-bound packet dropping) is Linux-specific via iptables owner module." + common.Reset)
 		common.PausePrompt()
@@ -2214,7 +2386,7 @@ print('LAN_BLOCKED_OK')
 "
 `, username)
 
-		out, err := common.ExecuteRemoteCommand(client, wrapSudo(script), common.DefaultCmdTimeout)
+		out, err := execRemote(client, wrapSudo(script))
 		if err == nil && strings.Contains(out, "LAN_BLOCKED_OK") {
 			fmt.Printf(common.Green+"✅ Success: Local LAN access is now blocked for user [%s]!\n"+common.Reset, username)
 		} else {
@@ -2246,7 +2418,7 @@ print('WAN_BLOCKED_OK')
 "
 `, username)
 
-		out, err := common.ExecuteRemoteCommand(client, wrapSudo(script), common.DefaultCmdTimeout)
+		out, err := execRemote(client, wrapSudo(script))
 		if err == nil && strings.Contains(out, "WAN_BLOCKED_OK") {
 			fmt.Printf(common.Green+"✅ Success: External internet access is now blackholed for user [%s]!\n"+common.Reset, username)
 		} else {
@@ -2275,7 +2447,7 @@ print('TOTAL_BLACKHOLE_OK')
 "
 `, username)
 
-		out, err := common.ExecuteRemoteCommand(client, wrapSudo(script), common.DefaultCmdTimeout)
+		out, err := execRemote(client, wrapSudo(script))
 		if err == nil && strings.Contains(out, "TOTAL_BLACKHOLE_OK") {
 			fmt.Printf(common.Green+"✅ Success: TRUE AIRGAP BLACKHOLE ENFORCED for user [%s]! (Zero LAN, Zero Host IP, Zero Internet, 127.0.0.1 Only)\n"+common.Reset, username)
 		} else {
@@ -2337,7 +2509,7 @@ print('RESTORE_NET_OK')
 "
 `, username, targetTag)
 
-		out, err := common.ExecuteRemoteCommand(client, wrapSudo(unblockScript), common.DefaultCmdTimeout)
+		out, err := execRemote(client, wrapSudo(unblockScript))
 		if err == nil && strings.Contains(out, "RESTORE_NET_OK") {
 			fmt.Printf(common.Green+"✅ Success: Selected network confinement rules cleanly unblocked for user [%s]!\n"+common.Reset, username)
 		} else {
@@ -2394,15 +2566,21 @@ func orchestrateHostNetwork(reader *bufio.Reader, client *ssh.Client) {
 	sig := fetchHostSignature(client)
 
 	if sig.OS == "windows" {
+		winOrchestrate(client, selectedIface, newIP, newGW, newDNS, newHostname)
+		common.PausePrompt()
+		return
+	}
+
+	if sig.OS == "windows" {
 		if newHostname != "" {
-			common.ExecuteRemoteCommand(client, fmt.Sprintf(`powershell -Command "Rename-Computer -NewName '%s' -Force"`, newHostname), common.DefaultCmdTimeout)
+			execRemote(client, fmt.Sprintf(`powershell -Command "Rename-Computer -NewName '%s' -Force"`, newHostname))
 		}
 		if newIP != "" {
 			cleanIP := strings.Split(newIP, "/")[0]
-			common.ExecuteRemoteCommand(client, fmt.Sprintf(`powershell -Command "New-NetIPAddress -InterfaceAlias '%s' -IPAddress '%s' -PrefixLength 24"`, selectedIface, cleanIP), common.DefaultCmdTimeout)
+			execRemote(client, fmt.Sprintf(`powershell -Command "New-NetIPAddress -InterfaceAlias '%s' -IPAddress '%s' -PrefixLength 24"`, selectedIface, cleanIP))
 		}
 		if newDNS != "" {
-			common.ExecuteRemoteCommand(client, fmt.Sprintf(`powershell -Command "Set-DnsClientServerAddress -InterfaceAlias '%s' -ServerAddresses ('%s')"`, selectedIface, newDNS), common.DefaultCmdTimeout)
+			execRemote(client, fmt.Sprintf(`powershell -Command "Set-DnsClientServerAddress -InterfaceAlias '%s' -ServerAddresses ('%s')"`, selectedIface, newDNS))
 		}
 		fmt.Println(common.Green + "✅ Host Network Parameters applied on Windows!" + common.Reset)
 		common.PausePrompt()
@@ -2411,14 +2589,14 @@ func orchestrateHostNetwork(reader *bufio.Reader, client *ssh.Client) {
 
 	if sig.OS == "darwin" {
 		if newHostname != "" {
-			common.ExecuteRemoteCommand(client, wrapSudo(fmt.Sprintf("scutil --set HostName '%s'", newHostname)), common.DefaultCmdTimeout)
+			execRemote(client, wrapSudo(fmt.Sprintf("scutil --set HostName '%s'", newHostname)))
 		}
 		if newIP != "" {
 			cleanIP := strings.Split(newIP, "/")[0]
-			common.ExecuteRemoteCommand(client, wrapSudo(fmt.Sprintf("ifconfig %s alias %s netmask 255.255.255.0", selectedIface, cleanIP)), common.DefaultCmdTimeout)
+			execRemote(client, wrapSudo(fmt.Sprintf("ifconfig %s alias %s netmask 255.255.255.0", selectedIface, cleanIP)))
 		}
 		if newDNS != "" {
-			common.ExecuteRemoteCommand(client, wrapSudo(fmt.Sprintf("networksetup -setdnsservers Ethernet %s 2>/dev/null || networksetup -setdnsservers Wi-Fi %s", newDNS, newDNS)), common.DefaultCmdTimeout)
+			execRemote(client, wrapSudo(fmt.Sprintf("networksetup -setdnsservers Ethernet %s 2>/dev/null || networksetup -setdnsservers Wi-Fi %s", newDNS, newDNS)))
 		}
 		fmt.Println(common.Green + "✅ Host Network Parameters applied on macOS!" + common.Reset)
 		common.PausePrompt()
@@ -2454,7 +2632,7 @@ EOF
 	script += "echo 'NET_ORCHESTRATE_SUCCESS'\n"
 
 	fmt.Println(common.Cyan + "[+] Applying network configuration changes..." + common.Reset)
-	out, err := common.ExecuteRemoteCommand(client, wrapSudo(script), common.DefaultCmdTimeout)
+	out, err := execRemote(client, wrapSudo(script))
 
 	if err == nil && strings.Contains(out, "NET_ORCHESTRATE_SUCCESS") {
 		fmt.Println(common.Green + "✅ Host Network Parameters successfully updated and applied!" + common.Reset)
@@ -2483,11 +2661,11 @@ func monitorAndKillSessions(reader *bufio.Reader, client *ssh.Client) {
 
 	var cmd string
 	if sig.OS == "windows" {
-		cmd = "quser 2>$null || whoami"
+		cmd = `powershell -Command "$q = quser 2>&1 | Out-String; if ($q -match 'USERNAME') { $q } else { whoami }"`
 	} else {
 		cmd = "w -h 2>/dev/null || who"
 	}
-	out, _ := common.ExecuteRemoteCommand(client, cmd, common.DefaultCmdTimeout)
+	out, _ := execRemote(client, cmd)
 
 	fmt.Println("Current Active Logins:")
 	fmt.Printf("%-15s %-10s %-18s %-10s %-10s %s\n", "USER", "TTY", "FROM IP", "LOGIN@", "IDLE", "WHAT")
@@ -2524,8 +2702,9 @@ func monitorAndKillSessions(reader *bufio.Reader, client *ssh.Client) {
 		confirm, _ := reader.ReadString('\n')
 		if strings.ToLower(strings.TrimSpace(confirm)) == "y" {
 			if sig.OS == "windows" {
-				common.ExecuteRemoteCommand(client, `powershell -Command "quser | ForEach-Object { $id = ($_ -split '\s+')[2]; if($id -match '^\d+$'){ logoff $id } }"`, common.DefaultCmdTimeout)
-				fmt.Println(common.Green + "✅ All active user terminal sessions have been terminated on Windows!" + common.Reset)
+				if _, psErr := execRemote(client, winKillAllCmd()); psErr == nil {
+					fmt.Println(common.Green + "✅ All active user terminal sessions have been terminated on Windows!" + common.Reset)
+				}
 			} else {
 				killAllScript := `
 python3 -c "
@@ -2537,7 +2716,7 @@ for p in pwd.getpwall():
 print('KILLALL_OK')
 "
 `
-				outKill, _ := common.ExecuteRemoteCommand(client, wrapSudo(killAllScript), common.DefaultCmdTimeout)
+				outKill, _ := execRemote(client, wrapSudo(killAllScript))
 				if strings.Contains(outKill, "KILLALL_OK") {
 					fmt.Println(common.Green + "✅ All active non-root user terminal sessions have been terminated!" + common.Reset)
 				}
@@ -2552,28 +2731,51 @@ print('KILLALL_OK')
 	actionIdx := InteractiveSelect(fmt.Sprintf("Action for user [%s]:", targetUser), []string{
 		"Terminate Session (kill -9 / logoff, keep account)",
 		"Terminate Session + Lock Account",
+		"Unlock Account (undo a previous lock)",
 		"Keep / Do Nothing (cancel)",
 	})
 
 	switch actionIdx {
-	case 0:
+	case 2:
+		var unlockErr error
 		if sig.OS == "windows" {
-			winKill := fmt.Sprintf(`powershell -Command "quser | Select-String '%s' | ForEach-Object { $id = ($_ -split '\s+')[2]; if($id -match '^\d+$'){ logoff $id } }"`, targetUser)
-			common.ExecuteRemoteCommand(client, winKill, common.DefaultCmdTimeout)
+			_, unlockErr = execRemote(client, fmt.Sprintf(`powershell -Command "Enable-LocalUser -Name '%[1]s' -ErrorAction Stop; if(-not (Get-LocalUser -Name '%[1]s').Enabled){ throw 'Account is still disabled after Enable-LocalUser' }"`, targetUser))
+		} else if sig.OS == "darwin" {
+			_, unlockErr = execRemote(client, wrapSudo(fmt.Sprintf("dscl . -delete /Users/%s AuthenticationAuthority", targetUser)))
+		} else {
+			_, unlockErr = execRemote(client, wrapSudo(fmt.Sprintf("passwd -u %s", targetUser)))
+		}
+		if unlockErr != nil {
+			fmt.Println(common.Red + "[!] Failed to unlock [" + targetUser + "]: " + unlockErr.Error() + common.Reset)
+		} else {
+			fmt.Println(common.Green + "✅ Account [" + targetUser + "] unlocked!" + common.Reset)
+		}
+	case 0:
+		var killErr error
+		if sig.OS == "windows" {
+			_, killErr = execRemote(client, winKillUserCmd(targetUser))
 		} else {
 			killCmd := fmt.Sprintf("pkill -9 -u %s", targetUser)
-			common.ExecuteRemoteCommand(client, wrapSudo(killCmd), common.DefaultCmdTimeout)
+			_, killErr = execRemote(client, wrapSudo(killCmd))
 		}
-		fmt.Println(common.Green + "✅ Active sessions terminated for user [" + targetUser + "]!" + common.Reset)
+		if killErr != nil {
+			fmt.Println(common.Red + "[!] Failed to terminate sessions for [" + targetUser + "]: " + killErr.Error() + common.Reset)
+		} else {
+			fmt.Println(common.Green + "✅ Active sessions terminated for user [" + targetUser + "]!" + common.Reset)
+		}
 	case 1:
+		var lockErr error
 		if sig.OS == "windows" {
-			winLock := fmt.Sprintf(`powershell -Command "quser | Select-String '%s' | ForEach-Object { $id = ($_ -split '\s+')[2]; if($id -match '^\d+$'){ logoff $id } }; Disable-LocalUser -Name '%s'"`, targetUser, targetUser)
-			common.ExecuteRemoteCommand(client, winLock, common.DefaultCmdTimeout)
+			_, lockErr = execRemote(client, winLockUserCmd(targetUser))
 		} else {
 			killLockCmd := fmt.Sprintf("pkill -9 -u %s; passwd -l %s 2>/dev/null || pw lock %s", targetUser, targetUser, targetUser)
-			common.ExecuteRemoteCommand(client, wrapSudo(killLockCmd), common.DefaultCmdTimeout)
+			_, lockErr = execRemote(client, wrapSudo(killLockCmd))
 		}
-		fmt.Println(common.Green + "✅ Sessions terminated and account [" + targetUser + "] locked!" + common.Reset)
+		if lockErr != nil {
+			fmt.Println(common.Red + "[!] Failed to terminate/lock [" + targetUser + "]: " + lockErr.Error() + common.Reset)
+		} else {
+			fmt.Println(common.Green + "✅ Sessions terminated and account [" + targetUser + "] locked!" + common.Reset)
+		}
 	default:
 		fmt.Println(common.Yellow + "[!] No action taken." + common.Reset)
 	}
@@ -2643,6 +2845,9 @@ func emergencyQuarantine(reader *bufio.Reader, client *ssh.Client) {
 
 	if action == "4" {
 		if sig.OS == "windows" {
+			winDryRun(client)
+			common.PausePrompt()
+			return
 			fmt.Println(common.Cyan + "\n[+] Running pre-flight Mass Purge simulation for Windows..." + common.Reset)
 			fmt.Println(common.Green + "[✔] IMMUNE / PROTECTED IDENTITIES: Administrator, DefaultAccount, Guest, Current User" + common.Reset)
 			fmt.Println(common.Yellow + "[!] TARGET IDENTITIES QUEUED FOR MASS PURGE: Non-default local accounts" + common.Reset)
@@ -2696,7 +2901,7 @@ print('\n=== DRY RUN VERDICT: SIMULATION COMPLETED SAFELY (ZERO CHANGES APPLIED)
 "
 `
 		fmt.Println(common.Cyan + "\n[+] Running pre-flight Mass Purge simulation..." + common.Reset)
-		out, err := common.ExecuteRemoteCommand(client, wrapSudo(dryRunPythonScript), common.DefaultCmdTimeout)
+		out, err := execRemote(client, wrapSudo(dryRunPythonScript))
 		if err == nil {
 			fmt.Println(common.Green + out + common.Reset)
 		} else {
@@ -2726,9 +2931,10 @@ print('\n=== DRY RUN VERDICT: SIMULATION COMPLETED SAFELY (ZERO CHANGES APPLIED)
 		}
 
 		if sig.OS == "windows" {
-			winNuke := `powershell -Command "Get-LocalUser | Where-Object { $_.Name -notin @('Administrator','DefaultAccount','Guest','WDAGUtilityAccount') } | Remove-LocalUser -Confirm:$false"`
-			common.ExecuteRemoteCommand(client, winNuke, common.DefaultCmdTimeout)
-			fmt.Println(common.Green + "✅ Windows System Sanitization Complete!" + common.Reset)
+			winNuke := winNukeCmd()
+			if _, psErr := execRemote(client, winNuke); psErr == nil {
+				fmt.Println(common.Green + "✅ Windows System Sanitization Complete!" + common.Reset)
+			}
 			common.PausePrompt()
 			return
 		}
@@ -2786,7 +2992,7 @@ print(f'NUCLEAR_PURGE_SUCCESS|Purged {len(to_purge)} users.')
 "
 `, rbacTierRegistry, rbacTierRegistry)
 		fmt.Println(common.Cyan + "\n[+] Executing full-spectrum system sanitization..." + common.Reset)
-		out, err := common.ExecuteRemoteCommand(client, wrapSudo(nuclearPythonScript), common.DefaultCmdTimeout)
+		out, err := execRemote(client, wrapSudo(nuclearPythonScript))
 
 		if err == nil && strings.Contains(out, "NUCLEAR_PURGE_SUCCESS") {
 			fmt.Println(common.Green + common.Bold + "\n✅ SYSTEM SANITIZATION COMPLETE:" + common.Reset)
@@ -2809,37 +3015,48 @@ print(f'NUCLEAR_PURGE_SUCCESS|Purged {len(to_purge)} users.')
 
 	switch action {
 	case "1":
+		var qErr error
 		if sig.OS == "windows" {
-			common.ExecuteRemoteCommand(client, fmt.Sprintf(`powershell -Command "Disable-LocalUser -Name '%s'"`, username), common.DefaultCmdTimeout)
+			_, qErr = execRemote(client, winQuarantineCmd(username))
 		} else if sig.OS == "darwin" {
-			common.ExecuteRemoteCommand(client, wrapSudo(fmt.Sprintf("dscl . -create /Users/%s AuthenticationAuthority ';DisabledUser;'", username)), common.DefaultCmdTimeout)
+			_, qErr = execRemote(client, wrapSudo(fmt.Sprintf("dscl . -create /Users/%s AuthenticationAuthority ';DisabledUser;'", username)))
 		} else {
 			cmd := fmt.Sprintf("passwd -l %s && pkill -9 -u %s && rm -f /etc/sudoers.d/cross_rbac_%s /etc/ssh/sshd_config.d/rbac_%s.conf && systemctl reload sshd",
 				username, username, username, username)
-			common.ExecuteRemoteCommand(client, wrapSudo(cmd), common.DefaultCmdTimeout)
+			_, qErr = execRemote(client, wrapSudo(cmd))
 		}
-		fmt.Println(common.Green + "✅ User [" + username + "] is now fully quarantined and locked out." + common.Reset)
+		if qErr != nil {
+			fmt.Println(common.Red + "[!] Failed to quarantine [" + username + "]: " + qErr.Error() + common.Reset)
+		} else {
+			fmt.Println(common.Green + "✅ User [" + username + "] is now fully quarantined and locked out." + common.Reset)
+		}
 
 	case "2":
+		var uErr error
 		if sig.OS == "windows" {
-			common.ExecuteRemoteCommand(client, fmt.Sprintf(`powershell -Command "Enable-LocalUser -Name '%s'"`, username), common.DefaultCmdTimeout)
+			_, uErr = execRemote(client, fmt.Sprintf(`powershell -Command "Enable-LocalUser -Name '%[1]s' -ErrorAction Stop; if(-not (Get-LocalUser -Name '%[1]s').Enabled){ throw 'Account is still disabled after Enable-LocalUser' }"`, username))
 		} else if sig.OS == "darwin" {
-			common.ExecuteRemoteCommand(client, wrapSudo(fmt.Sprintf("dscl . -delete /Users/%s AuthenticationAuthority", username)), common.DefaultCmdTimeout)
+			_, uErr = execRemote(client, wrapSudo(fmt.Sprintf("dscl . -delete /Users/%s AuthenticationAuthority", username)))
 		} else {
 			cmd := fmt.Sprintf("passwd -u %s", username)
-			common.ExecuteRemoteCommand(client, wrapSudo(cmd), common.DefaultCmdTimeout)
+			_, uErr = execRemote(client, wrapSudo(cmd))
 		}
-		fmt.Println(common.Green + "✅ User [" + username + "] unlocked successfully." + common.Reset)
+		if uErr != nil {
+			fmt.Println(common.Red + "[!] Failed to unlock [" + username + "]: " + uErr.Error() + common.Reset)
+		} else {
+			fmt.Println(common.Green + "✅ User [" + username + "] unlocked successfully." + common.Reset)
+		}
 
 	case "3":
 		fmt.Print(common.Red + "Type 'PURGE' to permanently delete user [" + username + "] and all files: " + common.Reset)
 		confirm, _ := reader.ReadString('\n')
 		if strings.TrimSpace(confirm) == "PURGE" {
 			if sig.OS == "windows" {
-				common.ExecuteRemoteCommand(client, fmt.Sprintf(`powershell -Command "Remove-LocalUser -Name '%s'"`, username), common.DefaultCmdTimeout)
-				fmt.Println(common.Green + "✅ User [" + username + "] purged from Windows." + common.Reset)
+				if _, psErr := execRemote(client, winPurgeUserCmd(username)); psErr == nil {
+					fmt.Println(common.Green + "✅ User [" + username + "] purged from Windows." + common.Reset)
+				}
 			} else if sig.OS == "darwin" {
-				common.ExecuteRemoteCommand(client, wrapSudo(fmt.Sprintf("sysadminctl -deleteUser %s", username)), common.DefaultCmdTimeout)
+				execRemote(client, wrapSudo(fmt.Sprintf("sysadminctl -deleteUser %s", username)))
 				fmt.Println(common.Green + "✅ User [" + username + "] purged from macOS." + common.Reset)
 			} else {
 				singlePurgeScript := fmt.Sprintf(`
@@ -2880,7 +3097,7 @@ subprocess.run(['systemctl', 'reload', 'sshd'], check=False)
 print('SINGLE_PURGE_SUCCESS')
 "
 `, username, rbacTierRegistry)
-				out, err := common.ExecuteRemoteCommand(client, wrapSudo(singlePurgeScript), common.DefaultCmdTimeout)
+				out, err := execRemote(client, wrapSudo(singlePurgeScript))
 				if err == nil && strings.Contains(out, "SINGLE_PURGE_SUCCESS") {
 					fmt.Println(common.Green + "✅ User [" + username + "] has been completely removed from the system." + common.Reset)
 				} else {
@@ -2907,7 +3124,7 @@ func manageMasterNode(reader *bufio.Reader, client *ssh.Client, host string) {
 
 	fmt.Println("\nDiscovering active hosts on the local subnet (ping sweep)...")
 	discoverCmd := `nmap -sn 192.168.0.0/24 2>/dev/null | grep -E "Nmap scan|MAC" | grep -v "Host is up" || echo "No nmap, try arp-scan"`
-	out, _ := common.ExecuteRemoteCommand(client, discoverCmd, common.DefaultCmdTimeout)
+	out, _ := execRemote(client, discoverCmd)
 	fmt.Println(out)
 
 	fmt.Print("\nEnter new target IP or hostname (or press Enter to cancel): ")

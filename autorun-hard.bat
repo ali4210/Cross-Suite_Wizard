@@ -14,7 +14,7 @@ echo [+] Target Directory: %CD%
 echo [+] Purging build caches and forcing module re-download...
 
 :: 1. DELEGATE DIRECTLY TO MAIN BOOTSTRAPPER IN FORCE MODE
-call "%~dp0autorun.bat" --force %*
+call "%~dp0autorun.bat" --hard %*
 
 :: 2. CAPTURE EXIT STATUS
 set "EXIT_CODE=%errorlevel%"
