@@ -1,0 +1,380 @@
+///######Do not Disturb the integrity of main.go-recovery file because that is the ther best stable file however with one flawe of over consuming CPU, so if you see that your main.go file not working at its fullest only than copy this main.go-recovery file to your main.go file and after usage based on your system if it gets hanged by the tool only than apply the patches one by one after proper testing###########///
+
+
+###############fix-1#########################
+
+func runInteractiveMenu() {
+	reader := bufio.NewReader(os.Stdin)
+
+	ctxRemote, cancelRemote := context.WithCancel(context.Background())
+	defer cancelRemote()
+
+	// Background cross-node chat and notification synchronizer
+	go func(ctx context.Context) {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				sessionMutex.RLock()
+				activeHost := currentSession.Host
+				sessionMutex.RUnlock()
+
+				if activeHost != "" {
+					if client := getOrEstablishGlobalSSH(); client != nil {
+						tunnel.SyncRemoteNotificationsAndChatSilent(client, activeHost)
+						tunnel.SyncAllLocalChatInboxes(activeHost)
+					}
+				}
+			}
+		}
+	}(ctxRemote)
+
+	for {
+		clearScreen()
+		syncInboundNotifications()
+
+		// min 1: Blocking read at kernel level (Zero CPU spin, no non-blocking runaway loop)
+		if runtime.GOOS != "windows" {
+			_ = exec.Command("stty", "-F", "/dev/tty", "cbreak", "min", "1", "-echo").Run()
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		var mu sync.Mutex
+		var wg sync.WaitGroup
+		inputBuffer := ""
+
+		renderFullMainMenuCanvas(inputBuffer)
+
+		// Throttled notification canvas updater (1s interval)
+		wg.Add(1)
+		go func(ctx context.Context) {
+			defer wg.Done()
+			ticker := time.NewTicker(1 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if syncInboundNotifications() {
+						mu.Lock()
+						renderFullMainMenuCanvas(inputBuffer)
+						mu.Unlock()
+					}
+				}
+			}
+		}(ctx)
+
+		var choice string
+		keyBuf := make([]byte, 16)
+
+		// Synchronous blocking input loop
+		for {
+			n, err := os.Stdin.Read(keyBuf)
+			if err != nil {
+				if err == io.EOF {
+					time.Sleep(50 * time.Millisecond)
+					continue
+				}
+				break
+			}
+
+			if n > 0 {
+				mu.Lock()
+				if n == 1 {
+					b := keyBuf[0]
+					switch b {
+					case 10, 13:
+						choice = strings.TrimSpace(inputBuffer)
+						mu.Unlock()
+						cancel()
+						wg.Wait()
+						goto ExecuteChoice
+					case 127, 8:
+						if len(inputBuffer) > 0 {
+							inputBuffer = inputBuffer[:len(inputBuffer)-1]
+							renderFullMainMenuCanvas(inputBuffer)
+						}
+					default:
+						if (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') {
+							inputBuffer += string(b)
+							renderFullMainMenuCanvas(inputBuffer)
+						}
+					}
+				}
+				mu.Unlock()
+			}
+		}
+
+	ExecuteChoice:
+		if runtime.GOOS != "windows" {
+			_ = exec.Command("stty", "-F", "/dev/tty", "sane").Run()
+		}
+
+		switch choice {
+		case "1":
+			hubTargetSessionManagement(reader)
+		case "2":
+			hubFileOperations(reader)
+		case "3":
+			hubInteractiveTerminalAndTunneling(reader)
+		case "4":
+			serviceManagerSubMenu(reader)
+		case "5":
+			hubUniversalPackageEngineAndHealer(reader)
+		case "6":
+			hubDevSecOpsAndSecurityOperations(reader)
+		case "7":
+			hubAccessControlAssigner(reader)
+		case "8":
+			option8Started := time.Now()
+			hubLocalWorkstationTools(reader)
+			appendProfileLog(
+				fmt.Sprintf(
+					"[OPTION8-PROFILE] Local Workstation hub returned after %s",
+					time.Since(option8Started),
+				),
+			)
+		case "9":
+			hubNetworkDiagnosticsAndTroubleshooting(reader)
+		case "10", "vpn", "VPN":
+			hubVPNEngine(reader)
+		case "11":
+			p2p.ShowP2PMenu(reader)
+		case "12":
+			hubStandaloneP2PCommunications(reader)
+		case "13":
+			var client *ssh.Client
+			sessionMutex.RLock()
+			if currentSession.IsActive && currentSession.Host != "" {
+				c, err := dialSSH(currentSession.Host, currentSession.Port, currentSession.User, currentSession.Pass, currentSession.KeyPath)
+				if err == nil {
+					client = c
+					defer client.Close()
+				}
+			}
+			currentUser := currentSession.User
+			host := currentSession.Host
+			sessionMutex.RUnlock()
+
+			if currentUser == "" {
+				currentUser = tunnel.GetLocalNodeIdentity()
+			}
+			ticket.ShowTicketMenu(reader, client, currentUser, host)
+		case "0", "q", "Q":
+			return
+		}
+	}
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+###############fix-2#########################
+
+
+
+
+
+
+
+var (
+	syncCheckMux  sync.Mutex
+	lastSyncCheck time.Time
+)
+
+func syncInboundNotifications() bool {
+	// Thread-safe rate limiter (prevents multi-thread race conditions & CPU thrashing)
+	syncCheckMux.Lock()
+	if time.Since(lastSyncCheck) < 800*time.Millisecond {
+		syncCheckMux.Unlock()
+		return false
+	}
+	lastSyncCheck = time.Now()
+	syncCheckMux.Unlock()
+
+	sessionMutex.RLock()
+	activeHost := currentSession.Host
+	sessionMutex.RUnlock()
+
+	rawSender, rawMsg, rawType := getLatestNotificationMessage(activeHost)
+
+	// Keep the sticky banner steady once rendered.
+	// Only update on fresh incoming signals or clear when explicitly acknowledged.
+	stickyNotifMutex.Lock()
+	rawSig := fmt.Sprintf("%s|%s|%s", rawSender, rawMsg, rawType)
+	if rawMsg != "" && rawSig != acknowledgedSig {
+		stickyNotif = tunnel.NotificationItem{SenderTag: rawSender, SenderIP: rawSender, Message: rawMsg, Type: rawType}
+		stickyNotifValid = true
+	}
+	sender, msg, typ := stickyNotif.SenderTag, stickyNotif.Message, stickyNotif.Type
+	valid := stickyNotifValid
+	stickyNotifMutex.Unlock()
+
+	isVoIP, voipPeer := tunnel.GetVoIPCallState()
+	activeTunnels := len(tunnel.GetActiveTunnels())
+	currentSig := fmt.Sprintf("%s|%s|%s|%t|%t|%s|%d", sender, msg, typ, valid, isVoIP, voipPeer, activeTunnels)
+
+	if currentSig != lastStateSignature {
+		lastStateSignature = currentSig
+		return true
+	}
+
+	return false
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+###############fix-3#########################
+
+
+var (
+	notifCacheMux      sync.RWMutex
+	lastNotifFileMtime = make(map[string]time.Time)
+	cachedRawSender    string
+	cachedRawMsg       string
+	cachedRawType      string
+	cachedLocalID      string
+)
+
+func getLatestNotificationMessage(activeHost string) (string, string, string) {
+	// Deduplicate candidates: /tmp/cross_notifications.json is os.TempDir() on Linux
+	candidates := []string{
+		filepath.Join(tunnel.GetUniversalBaseDir(), "notifications.json"),
+		"/tmp/cross_notifications.json",
+	}
+
+	sudoUser := os.Getenv("SUDO_USER")
+	if sudoUser != "" && sudoUser != "root" {
+		userPath := filepath.Join("/home", sudoUser, ".cross-ssh", "notifications.json")
+		if userPath != candidates[0] {
+			candidates = append(candidates, userPath)
+		}
+	}
+
+	if cachedLocalID == "" {
+		cachedLocalID = tunnel.GetLocalNodeIdentity()
+	}
+
+	notifCacheMux.Lock()
+	defer notifCacheMux.Unlock()
+
+	// Check if any candidate has been modified since last check
+	anyFileChanged := false
+	for _, p := range candidates {
+		info, err := os.Stat(p)
+		if err != nil || info.Size() == 0 {
+			continue
+		}
+		if !info.ModTime().Equal(lastNotifFileMtime[p]) {
+			anyFileChanged = true
+			lastNotifFileMtime[p] = info.ModTime()
+		}
+	}
+
+	// Fast path: No disk modifications detected, return cached notification state instantly
+	if !anyFileChanged && cachedRawMsg != "" {
+		return cachedRawSender, cachedRawMsg, cachedRawType
+	}
+
+	for _, p := range candidates {
+		data, err := os.ReadFile(p)
+		if err != nil || len(data) == 0 {
+			continue
+		}
+		lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+		for i := len(lines) - 1; i >= 0; i-- {
+			l := strings.TrimSpace(lines[i])
+			if l == "" {
+				continue
+			}
+
+			item, ok := parseNotificationLine(l)
+			if ok && !item.IsRead {
+				sender := item.SenderTag
+				if sender == "" {
+					sender = item.SenderIP
+				}
+
+				if sender == cachedLocalID || item.SenderIP == cachedLocalID || sender == "YOU" {
+					continue
+				}
+
+				cachedRawSender = sender
+				cachedRawMsg = item.Message
+				cachedRawType = item.Type
+				return cachedRawSender, cachedRawMsg, cachedRawType
+			}
+		}
+	}
+
+	cachedRawSender, cachedRawMsg, cachedRawType = "", "", ""
+	return "", "", ""
+}
+
+
+

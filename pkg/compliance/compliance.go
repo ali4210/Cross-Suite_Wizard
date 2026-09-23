@@ -1,4 +1,4 @@
-package security
+package compliance
 
 import (
 	"bufio"
