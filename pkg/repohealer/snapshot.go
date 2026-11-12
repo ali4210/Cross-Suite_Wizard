@@ -115,7 +115,7 @@ for target in "${TARGETS[@]}"; do
 
 	if [ -e "$target" ]; then
 		printf 'present\n' > "$metadata"
-		stat -c '%%a' "$target" >> "$metadata"
+		{ stat -c '%%a' "$target" 2>/dev/null || stat -f '%%OLp' "$target"; } >> "$metadata"
 		cp -a "$target" "$content"
 	else
 		printf 'absent\n' > "$metadata"
@@ -130,12 +130,18 @@ done
 (
 	cd "$SNAPSHOT_DIR"
 
-	sha256sum manifest.txt
+	if command -v sha256sum >/dev/null 2>&1; then
+		CHECKSUM_CMD="sha256sum"
+	else
+		CHECKSUM_CMD="shasum -a 256"
+	fi
+
+	$CHECKSUM_CMD manifest.txt
 
 	if find files -type f -print -quit | grep -q .; then
-		find files -type f -print0 \
-			| sort -z \
-			| xargs -0 sha256sum
+		find files -type f | LC_ALL=C sort | while IFS= read -r f; do
+			$CHECKSUM_CMD "$f"
+		done
 	fi
 ) > "$SNAPSHOT_DIR/checksums.sha256"
 
@@ -235,7 +241,11 @@ test -f "$SNAPSHOT_DIR/checksums.sha256"
 
 if ! (
 	cd "$SNAPSHOT_DIR"
-	sha256sum --strict -c checksums.sha256
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum --strict -c checksums.sha256
+	else
+		shasum -a 256 -c checksums.sha256
+	fi
 ); then
 	echo "ROLLBACK_ERROR|snapshot_checksum_verification_failed"
 	exit 30
