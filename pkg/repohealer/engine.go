@@ -35,27 +35,55 @@ func (e *Engine) Run() Result {
 	result.Target = facts
 	result.Evidence = append(result.Evidence, initialEvidence...)
 
+	networkEvidence, networkFindings := CollectNetworkFacts(e.exec)
+	result.Evidence = append(result.Evidence, networkEvidence...)
+	result.Findings = append(result.Findings, networkFindings...)
+
+	var adapter GenericAdapter
 	switch facts.PackageManager {
 	case ManagerAPT:
 		facts, aptFactsEvidence := CollectAPTFacts(e.exec, facts)
 		result.Target = facts
 		result.Evidence = append(result.Evidence, aptFactsEvidence)
 
-		adapter := APTAdapter{}
-		evidence, findings, actions := adapter.Diagnose(e.exec, facts, e.policy)
+		aptAdapter := APTAdapter{}
+		evidence, findings, actions := aptAdapter.Diagnose(e.exec, facts, e.policy)
 		result.Evidence = append(result.Evidence, evidence...)
 		result.Findings = append(result.Findings, findings...)
 		result.Actions = append(result.Actions, actions...)
+	case ManagerDNF:
+		adapter = DNFAdapter{BinaryName: "dnf"}
+	case ManagerYUM:
+		adapter = DNFAdapter{BinaryName: "yum"}
+	case ManagerPacman:
+		adapter = PacmanAdapter{}
+	case ManagerZypper:
+		adapter = ZypperAdapter{}
+	case ManagerAPK:
+		adapter = APKAdapter{}
+	case ManagerXBPS:
+		adapter = XBPSAdapter{}
+	case ManagerEmerge:
+		adapter = EmergeAdapter{}
+	case ManagerHomebrew:
+		adapter = HomebrewAdapter{}
 	default:
 		result.Findings = append(result.Findings, Finding{
 			Code:            "PACKAGE_MANAGER_ADAPTER_NOT_IMPLEMENTED",
 			Severity:        SeverityWarning,
 			Risk:            RiskManual,
-			Evidence:        "A package manager was detected, but its dedicated adapter is not implemented in this first backend milestone.",
-			RecommendedFix:  "Run in diagnostic-only mode and implement/test the native adapter before enabling repairs.",
+			Evidence:        "No supported package manager was detected on this target (or it is a Windows host — winget/Chocolatey/Scoop are handled by a separate PowerShell-based self-healer, not this engine).",
+			RecommendedFix:  "Run in diagnostic-only mode and implement/test a native adapter for this package manager before enabling repairs.",
 			AutoRepairable:  false,
 			RequiresConsent: false,
 		})
+	}
+
+	if adapter != nil {
+		evidence, findings, actions := adapter.Diagnose(e.exec, facts, e.policy)
+		result.Evidence = append(result.Evidence, evidence...)
+		result.Findings = append(result.Findings, findings...)
+		result.Actions = append(result.Actions, actions...)
 	}
 
 	if e.policy.CollectJournal && facts.Platform == PlatformLinux && facts.InitSystem == "systemd" {
@@ -88,12 +116,20 @@ elif command -v zypper >/dev/null 2>&1; then
   echo "manager=zypper"
 elif command -v pacman >/dev/null 2>&1; then
   echo "manager=pacman"
+elif command -v apk >/dev/null 2>&1; then
+  echo "manager=apk"
+elif command -v xbps-install >/dev/null 2>&1; then
+  echo "manager=xbps"
+elif command -v emerge >/dev/null 2>&1; then
+  echo "manager=emerge"
 elif command -v brew >/dev/null 2>&1; then
   echo "manager=homebrew"
 elif command -v winget >/dev/null 2>&1; then
   echo "manager=winget"
 elif command -v choco >/dev/null 2>&1; then
   echo "manager=chocolatey"
+elif command -v scoop >/dev/null 2>&1; then
+  echo "manager=scoop"
 else
   echo "manager=unknown"
 fi

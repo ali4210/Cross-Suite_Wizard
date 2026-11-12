@@ -44,9 +44,13 @@ const (
 	ManagerYUM        PackageManager = "yum"
 	ManagerZypper     PackageManager = "zypper"
 	ManagerPacman     PackageManager = "pacman"
+	ManagerAPK        PackageManager = "apk"
+	ManagerXBPS       PackageManager = "xbps"
+	ManagerEmerge     PackageManager = "emerge"
 	ManagerHomebrew   PackageManager = "homebrew"
 	ManagerWinget     PackageManager = "winget"
 	ManagerChocolatey PackageManager = "chocolatey"
+	ManagerScoop      PackageManager = "scoop"
 	ManagerUnknown    PackageManager = "unknown"
 )
 
@@ -113,6 +117,7 @@ type RepairAction struct {
 	SourceFormat         SourceFormat `json:"source_format,omitempty"`
 	RenderedSource       string       `json:"rendered_source,omitempty"`
 	SnapshotTargets      []string     `json:"snapshot_targets,omitempty"`
+	RunAsNonRoot         bool         `json:"run_as_non_root,omitempty"`
 }
 
 type Snapshot struct {

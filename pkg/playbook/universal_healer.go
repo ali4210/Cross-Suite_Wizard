@@ -2354,7 +2354,11 @@ func RunSelfHealingTroubleshooter(client *ssh.Client, targetOS osdetect.TargetOS
 		return
 	}
 
-	runSelectedRepositoryRepairFlow(client, result)
+	if result.Target.PackageManager == repohealer.ManagerAPT {
+		runSelectedRepositoryRepairFlow(client, result)
+	} else {
+		runSelectedGenericRepairFlow(client, result)
+	}
 }
 
 // InspectFootprintState reads state.json and displays it inside a scrollable pager view
