@@ -95,6 +95,24 @@ zypper --non-interactive refresh 2>&1
 			RequiresConsent: false,
 		})
 
+	case strings.Contains(lower, "could not resolve host") ||
+		strings.Contains(lower, "failed to retrieve") ||
+		strings.Contains(lower, "connection failed") ||
+		(strings.Contains(lower, "repository") && strings.Contains(lower, "is invalid")):
+		// Real zypper wording (verified against a live openSUSE container): "repository
+		// '<name>' is invalid", "failed to retrieve new repository metadata", and a curl
+		// error such as "could not resolve host: <host>" — none of which the original
+		// "not found"/"forbidden" check above matches.
+		findings = append(findings, Finding{
+			Code:            "ZYPPER_REPO_UNREACHABLE",
+			Severity:        SeverityError,
+			Risk:            RiskManual,
+			Evidence:        "zypper could not retrieve metadata from one or more configured repositories (DNS/connection failure).",
+			RecommendedFix:  "Verify network connectivity and that the repo URL in `zypper lr -u` is still valid before changing configuration.",
+			AutoRepairable:  false,
+			RequiresConsent: false,
+		})
+
 	case strings.Contains(lower, "valid metadata not found") || strings.Contains(lower, "failed to download"):
 		action := RepairAction{
 			ID:              "zypper-clean-refresh",

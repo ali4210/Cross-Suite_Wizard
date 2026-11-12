@@ -21,11 +21,63 @@ func TestAPTAdapterDiagnoseFindsExpiredKey(t *testing.T) {
 	}
 }
 
+// Regression test using the exact output captured from a live Debian 12 container: a repo
+// signed with a key that was valid at signing time but has since expired. This confirms
+// the EXPKEYSIG pattern (unlike several other patterns in this codebase) already matched
+// real apt wording correctly on the first try.
+func TestAPTAdapterDiagnoseFindsExpiredKeyRealWording(t *testing.T) {
+	exec := &fakeExecutor{
+		runSudoOutputs: []string{
+			"=== APT_SOURCES ===\n=== SIGNED_BY_REFERENCES ===\n=== KEYRINGS ===\n=== DPKG_AUDIT ===\n=== HELD_PACKAGES ===\n",
+			"Get:1 http://localhost:8000 stable InRelease [1456 B]\n" +
+				"Err:1 http://localhost:8000 stable InRelease\n" +
+				"  The following signatures were invalid: EXPKEYSIG AFADA0F6F5611105 Test Expiring Key <test@example.invalid>\n" +
+				"Reading package lists...\n" +
+				"W: GPG error: http://localhost:8000 stable InRelease: The following signatures were invalid: EXPKEYSIG AFADA0F6F5611105 Test Expiring Key <test@example.invalid>\n" +
+				"E: The repository 'http://localhost:8000 stable InRelease' is not signed.\n",
+		},
+	}
+
+	_, findings, _ := APTAdapter{}.Diagnose(
+		exec,
+		TargetFacts{Platform: PlatformLinux, PackageManager: ManagerAPT},
+		DefaultDiagnosticPolicy(),
+	)
+
+	if !containsCode(findingCodes(findings), "APT_REPO_KEY_EXPIRED") {
+		t.Fatalf("expected APT_REPO_KEY_EXPIRED finding, got %v", findingCodes(findings))
+	}
+}
+
 func TestAPTAdapterDiagnoseFindsCorruptListsCache(t *testing.T) {
 	exec := &fakeExecutor{
 		runSudoOutputs: []string{
 			"=== APT_SOURCES ===\n=== SIGNED_BY_REFERENCES ===\n=== KEYRINGS ===\n=== DPKG_AUDIT ===\n=== HELD_PACKAGES ===\n",
 			"Hash Sum mismatch\nSome index files failed to download\n",
+		},
+	}
+
+	_, findings, _ := APTAdapter{}.Diagnose(
+		exec,
+		TargetFacts{Platform: PlatformLinux, PackageManager: ManagerAPT},
+		DefaultDiagnosticPolicy(),
+	)
+
+	if !containsCode(findingCodes(findings), "APT_LISTS_CACHE_CORRUPT") {
+		t.Fatalf("expected APT_LISTS_CACHE_CORRUPT finding, got %v", findingCodes(findings))
+	}
+}
+
+// Regression test for modern apt's real wording, confirmed against a live Debian 12
+// (apt 2.6) container: a deliberately corrupted index on an HTTP-served local repo
+// produces "File has unexpected size (N != M). Mirror sync in progress?" — not the
+// classic "Hash Sum mismatch" string the original pattern only checked for.
+func TestAPTAdapterDiagnoseFindsModernSizeMismatchWording(t *testing.T) {
+	exec := &fakeExecutor{
+		runSudoOutputs: []string{
+			"=== APT_SOURCES ===\n=== SIGNED_BY_REFERENCES ===\n=== KEYRINGS ===\n=== DPKG_AUDIT ===\n=== HELD_PACKAGES ===\n",
+			"E: Failed to fetch http://localhost:8000/dists/stable/main/binary-amd64/Packages  File has unexpected size (105 != 85). Mirror sync in progress? [IP: 127.0.0.1 8000]\n" +
+				"E: Some index files failed to download. They have been ignored, or old ones used instead.\n",
 		},
 	}
 

@@ -312,12 +312,18 @@ exit ${PIPESTATUS[0]}
 		})
 	}
 
-	if strings.Contains(lowerUpdate, "hash sum mismatch") {
+	if strings.Contains(lowerUpdate, "hash sum mismatch") ||
+		strings.Contains(lowerUpdate, "file has unexpected size") ||
+		strings.Contains(lowerUpdate, "hashsum mismatch") {
+		// "Hash Sum mismatch" is the classic wording (apt < ~2.1). Modern apt (verified
+		// against a live Debian 12 container, apt 2.6) instead reports "File has
+		// unexpected size (N != M). Mirror sync in progress?" for the exact same
+		// condition — both are checked so either apt generation is caught.
 		findings = append(findings, Finding{
 			Code:            "APT_LISTS_CACHE_CORRUPT",
 			Severity:        SeverityError,
 			Risk:            RiskAutoSafe,
-			Evidence:        "apt-get update reported a Hash Sum mismatch, indicating a corrupted local package lists cache.",
+			Evidence:        "apt-get update reported a package index checksum/size mismatch, indicating a corrupted local package lists cache or an in-progress mirror sync.",
 			RecommendedFix:  "Clear the lists cache and re-fetch it (rm -rf /var/lib/apt/lists/* && apt-get update).",
 			AutoRepairable:  true,
 			RequiresConsent: true,

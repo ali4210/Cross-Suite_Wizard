@@ -54,7 +54,13 @@ xbps-install -S 2>&1
 			RequiresConsent: true,
 		})
 
-	case strings.Contains(lower, "could not fetch") || strings.Contains(lower, "name resolution") || strings.Contains(lower, "404"):
+	case strings.Contains(lower, "could not fetch") ||
+		strings.Contains(lower, "name resolution") ||
+		strings.Contains(lower, "404") ||
+		strings.Contains(lower, "failed to fetch") ||
+		strings.Contains(lower, "no address record"):
+		// Real xbps-install wording (verified against a live Void Linux container):
+		// "error: [reposync] failed to fetch file `...': no address record".
 		findings = append(findings, Finding{
 			Code:            "XBPS_REPO_UNREACHABLE",
 			Severity:        SeverityError,
@@ -65,13 +71,22 @@ xbps-install -S 2>&1
 			RequiresConsent: false,
 		})
 
-	case strings.Contains(lower, "corrupt") || strings.Contains(lower, "invalid repodata") || strings.Contains(lower, "unexpected"):
+	case strings.Contains(lower, "corrupt") ||
+		strings.Contains(lower, "invalid repodata") ||
+		strings.Contains(lower, "unexpected") ||
+		strings.Contains(lower, "failed to open repodata") ||
+		strings.Contains(lower, "invalid or incomplete"):
+		// Real xbps-install wording (verified against a live Void Linux container):
+		// "error: failed to open repodata: /var/db/xbps/<host>/x86_64-repodata: invalid or
+		// incomplete multibyte or wide character". The repodata cache itself lives in a
+		// per-mirror directory (e.g. /var/db/xbps/https___repo-default_voidlinux_org_current/),
+		// not a "https*.plist" file — the original rm target never matched anything real.
 		action := RepairAction{
 			ID:              "xbps-clean-resync",
 			FindingCode:     "XBPS_REPODATA_CORRUPT",
 			Risk:            RiskAutoSafe,
 			Description:     "Remove the cached repository index and re-sync.",
-			Commands:        []string{"rm -f /var/db/xbps/https*.plist", "xbps-install -S"},
+			Commands:        []string{"rm -rf /var/db/xbps/https___*/ /var/db/xbps/http___*/", "xbps-install -S"},
 			Verification:    []string{"xbps-install -S"},
 			RequiresConsent: true,
 			Eligible:        true,
@@ -82,7 +97,7 @@ xbps-install -S 2>&1
 			Severity:        SeverityError,
 			Risk:            RiskAutoSafe,
 			Evidence:        "xbps-install reported corrupted or invalid local repository data.",
-			RecommendedFix:  "Remove the cached repository index and re-sync (rm -f /var/db/xbps/https*.plist && xbps-install -S).",
+			RecommendedFix:  "Remove the cached repository index and re-sync (rm -rf /var/db/xbps/https___*/ && xbps-install -S).",
 			AutoRepairable:  true,
 			RequiresConsent: true,
 		})

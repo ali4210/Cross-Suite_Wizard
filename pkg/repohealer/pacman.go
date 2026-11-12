@@ -43,6 +43,19 @@ set +e
 pgrep -x pacman >/dev/null 2>&1 && echo PACMAN_RUNNING || echo PACMAN_NOT_RUNNING
 `)
 
+	// Read-only keyring and local-sync-db checks run BEFORE `pacman -Sy`: -Sy re-downloads
+	// and silently overwrites a corrupted local sync db with no error at all (verified
+	// against a live Arch container), so any read-based corruption check has to happen
+	// first or it never observes anything.
+	keyringCheck := runSudo(`set +e
+pacman-key --list-keys >/dev/null 2>&1 && echo KEYRING_OK || echo KEYRING_UNINITIALIZED
+`)
+
+	dbReadCheck := runSudo(`set +e
+pacman -Sl core 2>&1 | head -5
+`)
+	lowerDBRead := strings.ToLower(dbReadCheck)
+
 	syncCheck := runSudo(`set +e
 pacman -Sy 2>&1
 `)
@@ -85,6 +98,37 @@ pacman -Sy 2>&1
 	}
 
 	switch {
+	case strings.Contains(keyringCheck, "KEYRING_UNINITIALIZED"):
+		// Real wording (verified against a live Arch container with no keyring):
+		// "warning: public keyring not found; have you run 'pacman-key --init'?",
+		// "error: keyring is not writable", "error: required key missing from keyring" —
+		// none of which contain "signature"/"invalid"/"unknown trust". An uninitialized
+		// keyring is also the far more common real-world case than a genuinely invalid
+		// signature, and `pacman -Sy` alone never exercises signature checking at all
+		// (only an actual install/upgrade does), so this is checked directly instead of
+		// relying on sync output.
+		action := RepairAction{
+			ID:              "pacman-keyring-refresh",
+			FindingCode:     "PACMAN_KEYRING_INVALID",
+			Risk:            RiskApprovalNeeded,
+			Description:     "Reinitialize and refresh the pacman keyring from the distribution's trusted keyring package.",
+			Commands:        []string{"pacman-key --init", "pacman-key --populate archlinux", "pacman-key --refresh-keys"},
+			Verification:    []string{"pacman-key --list-keys"},
+			RequiresConsent: true,
+			Eligible:        true,
+			Target:          facts,
+		}
+		findings = append(findings, Finding{
+			Code:            action.FindingCode,
+			Severity:        SeverityError,
+			Risk:            RiskApprovalNeeded,
+			Evidence:        "pacman's keyring is not initialized (pacman-key --list-keys failed), which blocks any signed package install.",
+			RecommendedFix:  "Reinitialize and populate the pacman keyring (pacman-key --init, --populate archlinux, --refresh-keys).",
+			AutoRepairable:  true,
+			RequiresConsent: true,
+		})
+		actions = append(actions, action)
+
 	case strings.Contains(lowerSync, "signature") &&
 		(strings.Contains(lowerSync, "invalid") || strings.Contains(lowerSync, "unknown trust") || strings.Contains(lowerSync, "unknown public key")):
 		action := RepairAction{
@@ -109,9 +153,41 @@ pacman -Sy 2>&1
 		})
 		actions = append(actions, action)
 
+	case strings.Contains(lowerDBRead, "could not read db") ||
+		strings.Contains(lowerDBRead, "missing type keyword") ||
+		strings.Contains(lowerDBRead, "invalid or corrupted"):
+		// Real wording (verified against a live Arch container with a corrupted local
+		// sync db, read BEFORE -Sy silently overwrote it): "error: could not read db
+		// 'core' (missing type keyword in mtree specification)".
+		action := RepairAction{
+			ID:              "pacman-rebuild-sync-db",
+			FindingCode:     "PACMAN_SYNC_DB_CORRUPT",
+			Risk:            RiskAutoSafe,
+			Description:     "Remove the corrupted sync database cache and re-sync.",
+			Commands:        []string{"rm -f /var/lib/pacman/sync/*.db*", "pacman -Sy"},
+			Verification:    []string{"pacman -Sl core"},
+			RequiresConsent: true,
+			Eligible:        true,
+			Target:          facts,
+		}
+		findings = append(findings, Finding{
+			Code:            action.FindingCode,
+			Severity:        SeverityError,
+			Risk:            RiskAutoSafe,
+			Evidence:        "pacman reported a corrupted local sync database.",
+			RecommendedFix:  "Remove the corrupted sync database cache and re-sync (rm -f /var/lib/pacman/sync/*.db* && pacman -Sy) — this only rebuilds a local cache, it does not touch installed packages.",
+			AutoRepairable:  true,
+			RequiresConsent: true,
+		})
+		actions = append(actions, action)
+
 	case strings.Contains(lowerSync, "failed to retrieve") ||
+		strings.Contains(lowerSync, "failed retrieving") ||
 		strings.Contains(lowerSync, "could not resolve host") ||
 		strings.Contains(lowerSync, "404"):
+		// Real wording (verified against a live Arch container with an unreachable
+		// mirror): "error: failed retrieving file 'core.db' from <host> : could not
+		// resolve host: <host>" and "error: failed to synchronize all databases".
 		findings = append(findings, Finding{
 			Code:            "PACMAN_MIRROR_UNREACHABLE",
 			Severity:        SeverityError,
@@ -121,30 +197,6 @@ pacman -Sy 2>&1
 			AutoRepairable:  false,
 			RequiresConsent: true,
 		})
-
-	case strings.Contains(lowerSync, "database file") &&
-		(strings.Contains(lowerSync, "corrupted") || strings.Contains(lowerSync, "invalid or corrupted")):
-		action := RepairAction{
-			ID:              "pacman-rebuild-sync-db",
-			FindingCode:     "PACMAN_SYNC_DB_CORRUPT",
-			Risk:            RiskAutoSafe,
-			Description:     "Remove the corrupted sync database cache and re-sync.",
-			Commands:        []string{"rm -f /var/lib/pacman/sync/*.db*", "pacman -Sy"},
-			Verification:    []string{"pacman -Sy"},
-			RequiresConsent: true,
-			Eligible:        true,
-			Target:          facts,
-		}
-		findings = append(findings, Finding{
-			Code:            action.FindingCode,
-			Severity:        SeverityError,
-			Risk:            RiskAutoSafe,
-			Evidence:        "pacman reported a corrupted sync database.",
-			RecommendedFix:  "Remove the corrupted sync database cache and re-sync (rm -f /var/lib/pacman/sync/*.db* && pacman -Sy) — this only rebuilds a local cache, it does not touch installed packages.",
-			AutoRepairable:  true,
-			RequiresConsent: true,
-		})
-		actions = append(actions, action)
 	}
 
 	if strings.TrimSpace(syncCheck) == "" {

@@ -122,14 +122,27 @@ rpm --quiet -Va --nofiles --nodeps 2>&1 | head -10
 		actions = append(actions, action)
 	}
 
-	if strings.Contains(lowerInventory, "rpmdb: ") || strings.Contains(lowerInventory, "error: rpmdb") {
+	if strings.Contains(lowerInventory, "rpmdb: ") ||
+		strings.Contains(lowerInventory, "error: rpmdb") ||
+		strings.Contains(lowerInventory, "cannot open packages database") ||
+		strings.Contains(lowerInventory, "cannot open packages index") ||
+		strings.Contains(lowerInventory, "sqlite failure") ||
+		strings.Contains(lowerInventory, "rpmtsopendb failed") {
+		// Modern Fedora/RHEL 9+ (and dnf5) use a SQLite-backed rpmdb, not the classic BDB
+		// "rpmdb:" wording. Verified against a live Fedora container: a corrupted
+		// rpmdb.sqlite produces "error: cannot open Packages database in
+		// /usr/lib/sysimage/rpm" / "error: sqlite failure: ... file is not a database" /
+		// "rpmtsOpenDB failed". Both wordings are checked so either backend is caught.
 		action := RepairAction{
-			ID:              "dnf-rpmdb-rebuild",
-			FindingCode:     "DNF_RPMDB_CORRUPT",
-			Risk:            RiskAutoSafe,
-			Description:     "Rebuild the local RPM database.",
-			Commands:        []string{"rpm --rebuilddb"},
-			Verification:    []string{"rpm -qa --qf '%{NAME}\\n' | head -1 >/dev/null"},
+			ID:          "dnf-rpmdb-rebuild",
+			FindingCode: "DNF_RPMDB_CORRUPT",
+			Risk:        RiskAutoSafe,
+			Description: "Rebuild the local RPM database.",
+			Commands:    []string{"rpm --rebuilddb"},
+			// Not piped through `head`: a pipeline's exit status reflects the last
+			// command, so `rpm -qa | head -1` would report success even when rpm itself
+			// fails (verified live — this was a real bug, not just untested).
+			Verification:    []string{"rpm -qa --qf '%{NAME}\\n' >/dev/null"},
 			RequiresConsent: true,
 			Eligible:        true,
 			Target:          facts,

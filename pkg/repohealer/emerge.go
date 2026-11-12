@@ -44,7 +44,16 @@ emerge --sync 2>&1 | tail -60
 	lower := strings.ToLower(syncOut)
 
 	switch {
-	case strings.Contains(lower, "could not resolve") || strings.Contains(lower, "connection") || strings.Contains(lower, "timed out"):
+	case strings.Contains(lower, "could not resolve") ||
+		strings.Contains(lower, "connection") ||
+		strings.Contains(lower, "timed out") ||
+		strings.Contains(lower, "getaddrinfo failed") ||
+		strings.Contains(lower, "name or service not known") ||
+		strings.Contains(lower, "exhausted addresses"):
+		// Real wording (verified against a live Gentoo stage3 container with an
+		// unreachable rsync mirror): "getaddrinfo failed for '<host>': name or service not
+		// known" and "exhausted addresses for <host>". Checked before the generic rsync
+		// case below so a DNS failure gets DNS-specific guidance, not just "rsync failed".
 		findings = append(findings, Finding{
 			Code:            "EMERGE_SYNC_NETWORK_FAILURE",
 			Severity:        SeverityError,
