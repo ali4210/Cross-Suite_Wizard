@@ -1,0 +1,64 @@
+name: Module 5 Cross-Platform Tests
+
+on:
+  pull_request:
+    paths:
+      - 'pkg/repohealer/**'
+      - 'pkg/playbook/**'
+      - '.github/workflows/module5-cross-platform.yml'
+      - 'go.mod'
+      - 'go.sum'
+  push:
+    branches:
+      - main
+    paths:
+      - 'pkg/repohealer/**'
+      - 'pkg/playbook/**'
+      - '.github/workflows/module5-cross-platform.yml'
+      - 'go.mod'
+      - 'go.sum'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# This workflow only builds and tests module 5 (pkg/playbook, pkg/repohealer). No repair,
+# install, or otherwise destructive step is ever run here — every Windows/macOS-specific
+# step below only exercises read-only diagnose paths or parses PowerShell without
+# executing it.
+jobs:
+  build-and-test:
+    name: Build & test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: go build ./...
+        run: go build ./...
+
+      - name: go test pkg/playbook and pkg/repohealer
+        run: go test -count=1 -v ./pkg/playbook/... ./pkg/repohealer/...
+        # On windows-latest this run also executes
+        # TestWindowsDiagnosticProbeScriptExecutesReadOnly and
+        # TestWindowsFixActionScriptsParseCleanly (pkg/playbook, Windows-only build tag):
+        # the former runs the real, read-only winget/Chocolatey/Scoop/execution-policy/TLS
+        # probe script via PowerShell; the latter AST-parses (never executes) every fix
+        # action's PowerShell. On macos-latest it also executes
+        # TestHomebrewAdapterDiagnoseReadOnlyOnRealHost (pkg/repohealer, Darwin-only build
+        # tag), which runs the real HomebrewAdapter.Diagnose (brew doctor / brew update —
+        # both read-only) against the runner's real preinstalled Homebrew. On
+        # ubuntu-latest neither Windows- nor Darwin-tagged file is compiled in, so this
+        # step is build/test only there.

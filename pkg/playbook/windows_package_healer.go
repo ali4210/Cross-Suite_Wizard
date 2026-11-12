@@ -23,6 +23,38 @@ type windowsPackageFix struct {
 	Verify      string
 }
 
+// Named constants for every fix action's Script/Verify PowerShell, instead of inline
+// literals, so WindowsFixActionScriptsForCI (used by CI to parse-check them without ever
+// executing them) can't drift out of sync with what actually runs in production.
+const (
+	scriptWingetSourceReset  = "winget source reset --force"
+	verifyWingetSourceList   = "winget source list"
+	scriptChocoClearLibBad   = `Remove-Item -Path "$env:ChocolateyInstall\lib-bad\*" -Recurse -Force -ErrorAction SilentlyContinue`
+	verifyChocoLibBadCount   = `Get-ChildItem "$env:ChocolateyInstall\lib-bad" -ErrorAction SilentlyContinue | Measure-Object`
+	scriptChocoResetSource   = "choco source remove -n=chocolatey 2>$null; choco source add -n=chocolatey -s https://community.chocolatey.org/api/v2/"
+	verifyChocoSourceList    = "choco source list"
+	scriptScoopCheckupUpdate = "scoop checkup; scoop update"
+	verifyScoopBucketList    = "scoop bucket list"
+	scriptSetExecPolicy      = "Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force"
+	verifyGetExecPolicy      = "Get-ExecutionPolicy -Scope CurrentUser"
+	scriptEnableTLS12        = "[System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072"
+	verifyTLSProtocol        = "[System.Net.ServicePointManager]::SecurityProtocol"
+)
+
+// WindowsFixActionScriptsForCI returns every fix action's Script and Verify PowerShell
+// fragment, for CI to parse-check (never execute — several of these are mutating) without
+// duplicating or risking drift from what diagnoseWindowsPackageManagers actually uses.
+func WindowsFixActionScriptsForCI() []string {
+	return []string{
+		scriptWingetSourceReset, verifyWingetSourceList,
+		scriptChocoClearLibBad, verifyChocoLibBadCount,
+		scriptChocoResetSource, verifyChocoSourceList,
+		scriptScoopCheckupUpdate, verifyScoopBucketList,
+		scriptSetExecPolicy, verifyGetExecPolicy,
+		scriptEnableTLS12, verifyTLSProtocol,
+	}
+}
+
 // RunWindowsPackageManagerHealer is the Windows-native counterpart to Option 7's Universal
 // Repository Healer. It never goes through the bash-based repohealer engine (that engine's
 // diagnostics are plain POSIX shell and do not run against a native Windows SSH target).
@@ -134,11 +166,15 @@ func RunWindowsPackageManagerHealer(client *ssh.Client) {
 	}
 }
 
-// diagnoseWindowsPackageManagers runs a single read-only PowerShell probe covering winget,
-// Chocolatey, Scoop, the PowerShell execution policy, and the TLS 1.2 setting, then turns
-// anything suspicious into findings and candidate fixes.
-func diagnoseWindowsPackageManagers(client *ssh.Client) ([]repohealer.Finding, []windowsPackageFix, string) {
-	const probe = `
+// WindowsDiagnosticProbeScript returns the exact, read-only PowerShell probe script used
+// to diagnose winget/Chocolatey/Scoop/execution-policy/TLS state. Exported as a single
+// source of truth so CI can execute the real script directly (see
+// windows_probe_ci_test.go) without duplicating it or drifting from production code.
+func WindowsDiagnosticProbeScript() string {
+	return windowsDiagnosticProbeScript
+}
+
+const windowsDiagnosticProbeScript = `
 Write-Output '=== WINGET ==='
 if (Get-Command winget -ErrorAction SilentlyContinue) {
     Write-Output 'PRESENT'
@@ -175,7 +211,12 @@ Write-Output '=== EXEC_POLICY ==='
 Write-Output '=== TLS ==='
 ([System.Net.ServicePointManager]::SecurityProtocol)
 `
-	output := runWindowsPowerShell(client, probe, "Diagnosing Windows Package Managers")
+
+// diagnoseWindowsPackageManagers runs a single read-only PowerShell probe covering winget,
+// Chocolatey, Scoop, the PowerShell execution policy, and the TLS 1.2 setting, then turns
+// anything suspicious into findings and candidate fixes.
+func diagnoseWindowsPackageManagers(client *ssh.Client) ([]repohealer.Finding, []windowsPackageFix, string) {
+	output := runWindowsPowerShell(client, windowsDiagnosticProbeScript, "Diagnosing Windows Package Managers")
 	normalized := strings.ReplaceAll(output, "\r\n", "\n")
 	sections := splitWindowsFactSections(normalized)
 
@@ -206,8 +247,8 @@ Write-Output '=== TLS ==='
 		actions = append(actions, windowsPackageFix{
 			ID:          "winget-source-reset",
 			Description: "Reset winget package sources",
-			Script:      "winget source reset --force",
-			Verify:      "winget source list",
+			Script:      scriptWingetSourceReset,
+			Verify:      verifyWingetSourceList,
 		})
 	}
 
@@ -236,8 +277,8 @@ Write-Output '=== TLS ==='
 			actions = append(actions, windowsPackageFix{
 				ID:          "choco-clear-lib-bad",
 				Description: "Clear Chocolatey's lib-bad (failed install) directory",
-				Script:      `Remove-Item -Path "$env:ChocolateyInstall\lib-bad\*" -Recurse -Force -ErrorAction SilentlyContinue`,
-				Verify:      `Get-ChildItem "$env:ChocolateyInstall\lib-bad" -ErrorAction SilentlyContinue | Measure-Object`,
+				Script:      scriptChocoClearLibBad,
+				Verify:      verifyChocoLibBadCount,
 			})
 		}
 		if strings.Contains(choco, "SOURCE_LIST_ERROR") {
@@ -253,8 +294,8 @@ Write-Output '=== TLS ==='
 			actions = append(actions, windowsPackageFix{
 				ID:          "choco-reset-source",
 				Description: "Reset Chocolatey's default community source",
-				Script:      "choco source remove -n=chocolatey 2>$null; choco source add -n=chocolatey -s https://community.chocolatey.org/api/v2/",
-				Verify:      "choco source list",
+				Script:      scriptChocoResetSource,
+				Verify:      verifyChocoSourceList,
 			})
 		}
 	}
@@ -283,8 +324,8 @@ Write-Output '=== TLS ==='
 		actions = append(actions, windowsPackageFix{
 			ID:          "scoop-checkup-update",
 			Description: "Run scoop checkup and update",
-			Script:      "scoop checkup; scoop update",
-			Verify:      "scoop bucket list",
+			Script:      scriptScoopCheckupUpdate,
+			Verify:      verifyScoopBucketList,
 		})
 	}
 
@@ -302,8 +343,8 @@ Write-Output '=== TLS ==='
 		actions = append(actions, windowsPackageFix{
 			ID:          "powershell-execution-policy-remotesigned",
 			Description: "Set CurrentUser PowerShell execution policy to RemoteSigned",
-			Script:      "Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force",
-			Verify:      "Get-ExecutionPolicy -Scope CurrentUser",
+			Script:      scriptSetExecPolicy,
+			Verify:      verifyGetExecPolicy,
 		})
 	}
 
@@ -321,8 +362,8 @@ Write-Output '=== TLS ==='
 		actions = append(actions, windowsPackageFix{
 			ID:          "powershell-enable-tls12",
 			Description: "Enable TLS 1.2 for the current PowerShell session",
-			Script:      "[System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072",
-			Verify:      "[System.Net.ServicePointManager]::SecurityProtocol",
+			Script:      scriptEnableTLS12,
+			Verify:      verifyTLSProtocol,
 		})
 	}
 
