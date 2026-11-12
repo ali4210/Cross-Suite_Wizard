@@ -69,10 +69,10 @@ func runSelectedAPTListRepairExecutionFlow(
 
 	mode := strings.TrimSpace(
 		transfer.ReadRealtimeInput(
-			"Type a to continue to apply confirmation, or press Enter to exit after preview: ",
+			"Type a, y, or yes to continue to apply confirmation, or press Enter to exit after preview: ",
 		),
 	)
-	if !strings.EqualFold(mode, "a") {
+	if !shouldContinueGatedRepairAfterPreview(mode) {
 		fmt.Println(Yellow + "[PREVIEW COMPLETE] No system changes were made." + Reset)
 		return
 	}
@@ -124,6 +124,28 @@ func runSelectedAPTListRepairExecutionFlow(
 		return
 	}
 
+	auditPath := repohealer.HashiCorpAPTListRepairAuditPath()
+
+	if !printOperatorPolicyGateIfDisabled(
+		repohealer.HashiCorpAPTListRepairExecutionEnabledEnv,
+		repohealer.HashiCorpAPTListRepairExecutionEnabled(),
+	) {
+		execution := repohealer.HashiCorpAPTListRepairApprovalResult{
+			Status:      repohealer.HashiCorpAPTListRepairApprovalStatusBlocked,
+			ActionID:    request.ActionID,
+			ProfileID:   request.ProfileID,
+			SourceFile:  request.SourceFile,
+			KeyringPath: request.KeyringPath,
+			Reason: fmt.Sprintf(
+				"HashiCorp APT-list repair execution is disabled by operator policy; set %s=true only for approved maintenance",
+				repohealer.HashiCorpAPTListRepairExecutionEnabledEnv,
+			),
+		}
+		fmt.Println("\n" + repohealer.FormatHashiCorpAPTListRepairApprovalResult(execution))
+		appendHashiCorpAPTListRepairAudit(auditPath, execution)
+		return
+	}
+
 	fmt.Println(
 		Red + Bold +
 			"\n[!] APPLY MODE: The reviewed HashiCorp APT-list repair may replace only the displayed keyring file." +
@@ -143,8 +165,13 @@ func runSelectedAPTListRepairExecutionFlow(
 
 	execution := repohealer.ApproveAndApplyHashiCorpAPTListRepair(exec, preflight, confirmation)
 	fmt.Println("\n" + repohealer.FormatHashiCorpAPTListRepairApprovalResult(execution))
+	appendHashiCorpAPTListRepairAudit(auditPath, execution)
+}
 
-	auditPath := repohealer.HashiCorpAPTListRepairAuditPath()
+func appendHashiCorpAPTListRepairAudit(
+	auditPath string,
+	execution repohealer.HashiCorpAPTListRepairApprovalResult,
+) {
 	audit := repohealer.BuildHashiCorpAPTListRepairAuditEvent(execution, time.Now())
 	if err := repohealer.AppendHashiCorpAPTListRepairAuditEvent(auditPath, audit); err != nil {
 		fmt.Fprintf(

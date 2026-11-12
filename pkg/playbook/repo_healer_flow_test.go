@@ -1,11 +1,92 @@
 package playbook
 
 import (
+	"os"
 	"strings"
 	"testing"
 
 	"cross-ssh/pkg/repohealer"
 )
+
+func TestShouldContinueGatedRepairAfterPreviewAcceptsAYOrYes(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{name: "Empty exits after preview", input: "", want: false},
+		{name: "Whitespace-only exits after preview", input: " ", want: false},
+		{name: "Preview-command exits after preview", input: "p", want: false},
+		{name: "Cancel exits after preview", input: "q", want: false},
+		{name: "No exits after preview", input: "no", want: false},
+		{name: "Long apply does not bypass exact mode", input: "apply", want: false},
+		{name: "Exact a continues", input: "a", want: true},
+		{name: "Uppercase A continues", input: "A", want: true},
+		{name: "Trimmed a continues", input: "  a  ", want: true},
+		{name: "y continues", input: "y", want: true},
+		{name: "Uppercase Y continues", input: "Y", want: true},
+		{name: "yes continues, never a silent exit", input: "yes", want: true},
+		{name: "Mixed-case YES continues", input: "YES", want: true},
+		{name: "Trimmed yes continues", input: "  yes  ", want: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := shouldContinueGatedRepairAfterPreview(test.input); got != test.want {
+				t.Fatalf(
+					"shouldContinueGatedRepairAfterPreview(%q) = %t, want %t",
+					test.input,
+					got,
+					test.want,
+				)
+			}
+		})
+	}
+}
+
+func TestPrintOperatorPolicyGateIfDisabledReturnsEnabledUnchanged(t *testing.T) {
+	if !printOperatorPolicyGateIfDisabled("CROSS_SUITE_EXAMPLE_ENABLED", true) {
+		t.Fatal("an enabled policy must allow the caller to proceed")
+	}
+	if printOperatorPolicyGateIfDisabled("CROSS_SUITE_EXAMPLE_ENABLED", false) {
+		t.Fatal("a disabled policy must block the caller from proceeding")
+	}
+}
+
+// TestRunSelectedDeb822RepairExecutionFlowChecksPolicyBeforeTypedYes mirrors the equivalent
+// APT-list and fix-broken tests: the operator policy check (naming the exact env var) must
+// appear before the typed-yes apply prompt in source order, and the real apply call must still
+// be present unweakened.
+func TestRunSelectedDeb822RepairExecutionFlowChecksPolicyBeforeTypedYes(t *testing.T) {
+	source, err := os.ReadFile("repo_healer_flow.go")
+	if err != nil {
+		t.Fatalf("os.ReadFile() error = %v", err)
+	}
+	code := string(source)
+
+	policyCheckIndex := strings.Index(code, "printOperatorPolicyGateIfDisabled(")
+	applyPromptIndex := strings.Index(code, "Type yes to apply this exact reviewed Deb822 repair")
+
+	if policyCheckIndex == -1 {
+		t.Fatal("expected a printOperatorPolicyGateIfDisabled call")
+	}
+	if applyPromptIndex == -1 {
+		t.Fatal("expected the typed-yes apply confirmation prompt to still be present")
+	}
+	if policyCheckIndex > applyPromptIndex {
+		t.Fatal("the operator policy check must appear before the typed-yes apply prompt")
+	}
+
+	if !strings.Contains(code, "repohealer.Deb822RepairExecutionEnabledEnv") {
+		t.Fatal("expected the exact operator-policy env var name to be referenced, not hardcoded")
+	}
+	if !strings.Contains(code, "sudo %s=true") {
+		t.Fatal("expected a sudo-safe example command for enabling the policy")
+	}
+	if !strings.Contains(code, "repohealer.ApproveAndApplyDeb822Repair(") {
+		t.Fatal("the real gated apply call must still be present; the pre-check must not replace it")
+	}
+}
 
 func TestShouldRouteThroughAPTListRepairFlow(t *testing.T) {
 	tests := []struct {

@@ -54,3 +54,31 @@ func TestRunAPTFixBrokenRepairFlowNeverBypassesConfirmation(t *testing.T) {
 		t.Fatal("fix-broken flow must never run apt-mark unhold")
 	}
 }
+
+// TestRunAPTFixBrokenRepairFlowChecksPolicyBeforeTypedConfirmation confirms the operator
+// policy check appears before the "FIX BROKEN PACKAGES" apply prompt in source order, and that
+// the real exact-phrase confirmation prompt is still present unweakened.
+func TestRunAPTFixBrokenRepairFlowChecksPolicyBeforeTypedConfirmation(t *testing.T) {
+	source, err := os.ReadFile("repo_healer_fix_broken_flow.go")
+	if err != nil {
+		t.Fatalf("os.ReadFile() error = %v", err)
+	}
+	code := string(source)
+
+	policyCheckIndex := strings.Index(code, "printOperatorPolicyGateIfDisabled(")
+	applyPromptIndex := strings.Index(code, "Type FIX BROKEN PACKAGES (exact phrase) to apply")
+
+	if policyCheckIndex == -1 {
+		t.Fatal("expected a printOperatorPolicyGateIfDisabled call")
+	}
+	if applyPromptIndex == -1 {
+		t.Fatal("expected the exact-phrase apply confirmation prompt to still be present")
+	}
+	if policyCheckIndex > applyPromptIndex {
+		t.Fatal("the operator policy check must appear before the exact-phrase apply prompt")
+	}
+
+	if !strings.Contains(code, "repohealer.APTFixBrokenRepairExecutionEnabledEnv") {
+		t.Fatal("expected the exact operator-policy env var name to be referenced, not hardcoded")
+	}
+}

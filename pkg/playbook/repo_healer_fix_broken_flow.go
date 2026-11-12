@@ -48,11 +48,29 @@ func runAPTFixBrokenRepairFlow(exec repohealer.Executor) {
 
 	mode := strings.TrimSpace(
 		transfer.ReadRealtimeInput(
-			"Type a to continue to apply confirmation, or press Enter to exit after preview: ",
+			"Type a, y, or yes to continue to apply confirmation, or press Enter to exit after preview: ",
 		),
 	)
-	if !strings.EqualFold(mode, "a") {
+	if !shouldContinueGatedRepairAfterPreview(mode) {
 		fmt.Println(Yellow + "[PREVIEW COMPLETE] No system changes were made." + Reset)
+		return
+	}
+
+	auditPath := repohealer.APTFixBrokenAuditPath()
+
+	if !printOperatorPolicyGateIfDisabled(
+		repohealer.APTFixBrokenRepairExecutionEnabledEnv,
+		repohealer.APTFixBrokenRepairExecutionEnabled(),
+	) {
+		execution := repohealer.APTFixBrokenApprovalResult{
+			Status: repohealer.APTFixBrokenApprovalStatusBlocked,
+			Reason: fmt.Sprintf(
+				"APT fix-broken repair execution is disabled by operator policy; set %s=true only for approved maintenance",
+				repohealer.APTFixBrokenRepairExecutionEnabledEnv,
+			),
+		}
+		fmt.Println("\n" + repohealer.FormatAPTFixBrokenApprovalResult(execution))
+		appendAPTFixBrokenRepairAudit(auditPath, execution)
 		return
 	}
 
@@ -75,8 +93,13 @@ func runAPTFixBrokenRepairFlow(exec repohealer.Executor) {
 
 	execution := repohealer.ApproveAndApplyAPTFixBrokenRepair(exec, preview, confirmation)
 	fmt.Println("\n" + repohealer.FormatAPTFixBrokenApprovalResult(execution))
+	appendAPTFixBrokenRepairAudit(auditPath, execution)
+}
 
-	auditPath := repohealer.APTFixBrokenAuditPath()
+func appendAPTFixBrokenRepairAudit(
+	auditPath string,
+	execution repohealer.APTFixBrokenApprovalResult,
+) {
 	audit := repohealer.BuildAPTFixBrokenAuditEvent(execution, time.Now())
 	if err := repohealer.AppendAPTFixBrokenAuditEvent(auditPath, audit); err != nil {
 		fmt.Fprintf(
