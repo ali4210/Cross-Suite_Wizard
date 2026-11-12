@@ -15,11 +15,16 @@ import (
 // single %, turning a longest-match shell parameter expansion into a shortest-match one) that
 // every other test in this package missed because they all feed hand-written output strings
 // straight into the parser instead of exercising the shell script itself.
+//
+// This is skipped on Windows via skipIfNotPOSIX, the same guard snapshot_integration_test.go
+// uses: the probe script only ever targets a remote Linux/macOS host over SSH in production, so
+// a Windows test runner has neither a POSIX uid/path model nor a GNU-compatible sha256sum/stat
+// (Git for Windows' bundled sha256sum prepends a "\" escape marker for backslash-containing
+// paths, which a Windows-style t.TempDir() always produces) — a genuine "not applicable here",
+// not a masked failure.
 func TestHashiCorpAPTListRepairPreflightProbeScriptSplitsRealFileMetadataFields(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not available")
-	}
-	for _, tool := range []string{"stat", "sha256sum", "gpg", "install", "mv"} {
+	skipIfNotPOSIX(t)
+	for _, tool := range []string{"bash", "stat", "sha256sum", "gpg", "install", "mv"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Skipf("%s not available", tool)
 		}

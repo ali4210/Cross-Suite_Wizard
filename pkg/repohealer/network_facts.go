@@ -24,7 +24,10 @@ echo '=== DISK ==='
 df -Pk / 2>/dev/null | tail -n 1
 echo '=== CLEANUP ==='
 du -sh /var/cache/apt/archives 2>/dev/null
-find /var/log -type f -printf '%s\t%p\n' 2>/dev/null | sort -rn | head -n 5 \
+find /var/log -type f 2>/dev/null | while IFS= read -r f; do
+  size=$(stat -c '%s' -- "$f" 2>/dev/null || stat -f '%z' -- "$f" 2>/dev/null) || continue
+  printf '%s\t%s\n' "$size" "$f"
+done | sort -rn | head -n 5 \
   | awk -F'\t' '{printf "%.1fM\t%s\n", $1/1048576, $2}'
 `
 	started := time.Now()
