@@ -8,8 +8,17 @@ chcp 65001 >nul
 net session >nul 2>&1
 if %errorlevel% neq 0 (
     echo Requesting administrative privileges...
-    powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs -ArgumentList '%*' -WorkingDirectory '%~dp0'"
-    exit /b
+    set "AUTORUN_ARGC=0"
+    for %%A in (%*) do (
+        set /a AUTORUN_ARGC+=1
+        set "AUTORUN_ARG_!AUTORUN_ARGC!=%%~A"
+    )
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "$argc=[int]$env:AUTORUN_ARGC; $arglist=@(); for($i=1;$i -le $argc;$i++){ $arglist += [Environment]::GetEnvironmentVariable('AUTORUN_ARG_'+$i) }; try { Start-Process -FilePath '%~f0' -ArgumentList $arglist -Verb RunAs -WorkingDirectory '%~dp0' -ErrorAction Stop } catch { Write-Host '[!] Administrator privileges were not granted - elevation was cancelled or failed.'; Write-Host '    Re-run this script and accept the UAC prompt, or launch it from an elevated command prompt.'; exit 1 }"
+    if errorlevel 1 (
+        pause
+        exit /b 1
+    )
+    exit /b 0
 )
 
 :: ==============================================================================

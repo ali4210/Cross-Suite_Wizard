@@ -56,6 +56,19 @@ fix_go_cache_ownership() {
 }
 fix_go_cache_ownership
 
+# 3c. ROOT/SUDO AVAILABILITY GUARD
+# Fails fast with a clear message instead of letting `set -e` abort on a raw
+# sudo/tar/package-manager error when this environment has no way to elevate.
+require_elevation() {
+    [ "$(id -u)" -eq 0 ] && return 0
+    if ! command -v sudo >/dev/null 2>&1; then
+        echo "==>> [!] Root privileges are required for this step, but 'sudo' is not installed and you are not root."
+        echo "    Install Go manually from https://go.dev/dl/, or re-run this script as root."
+        exit 1
+    fi
+    return 0
+}
+
 # 4. FUNCTION: Fallback Manual Go Toolchain Installer
 install_go_manual() {
     echo "==>> Downloading official standalone Go runtime..."
@@ -81,6 +94,7 @@ install_go_manual() {
         exit 1
     fi
 
+    require_elevation
     sudo rm -rf /usr/local/go
     sudo tar -C /usr/local -xzf /tmp/go.tar.gz
     rm -f /tmp/go.tar.gz
@@ -100,17 +114,23 @@ if ! command -v go >/dev/null 2>&1; then
             install_go_manual
         fi
     elif command -v apt-get >/dev/null 2>&1; then
-        sudo apt-get update -qq
+        require_elevation
+        sudo apt-get update -qq || true
         sudo apt-get install -y -qq golang-go curl 2>/dev/null || sudo apt-get install -y -qq golang curl || install_go_manual
     elif command -v dnf >/dev/null 2>&1; then
+        require_elevation
         sudo dnf install -y -q golang curl 2>/dev/null || install_go_manual
     elif command -v yum >/dev/null 2>&1; then
+        require_elevation
         sudo yum install -y -q golang curl 2>/dev/null || install_go_manual
     elif command -v pacman >/dev/null 2>&1; then
+        require_elevation
         sudo pacman -S --noconfirm go curl 2>/dev/null || install_go_manual
     elif command -v zypper >/dev/null 2>&1; then
+        require_elevation
         sudo zypper --non-interactive install go curl 2>/dev/null || install_go_manual
     elif command -v apk >/dev/null 2>&1; then
+        require_elevation
         sudo apk add go curl 2>/dev/null || install_go_manual
     else
         install_go_manual
