@@ -3569,31 +3569,167 @@ EOF
 }
 
 // TuneMirrorSpeed enables fastestmirror on Linux or parallel downloads on Windows
+// mirrorTuneTarget is one package manager's persistent speed-tuning config file and the
+// line ensured present in it.
+type mirrorTuneTarget struct {
+	Manager     string
+	Path        string
+	EnsureLines []string
+	Probe       string // command used to confirm the manager is present
+}
+
+var mirrorTuneTargets = []mirrorTuneTarget{
+	{
+		Manager:     "apt",
+		Path:        "/etc/apt/apt.conf.d/99-cross-suite-speed.conf",
+		EnsureLines: []string{`Acquire::Retries "3";`, `Acquire::http::Pipeline-Depth "5";`},
+		Probe:       "apt-get",
+	},
+	{
+		Manager:     "dnf/yum",
+		Path:        "/etc/dnf/dnf.conf",
+		EnsureLines: []string{"fastestmirror=True", "max_parallel_downloads=10"},
+		Probe:       "dnf",
+	},
+	{
+		Manager:     "pacman",
+		Path:        "/etc/pacman.conf",
+		EnsureLines: []string{"ParallelDownloads = 5"},
+		Probe:       "pacman",
+	},
+	{
+		Manager:     "zypper",
+		Path:        "/etc/zypp/zypp.conf",
+		EnsureLines: []string{"download.max_concurrent_connections = 5"},
+		Probe:       "zypper",
+	},
+}
+
+// TuneMirrorSpeed persistently tunes each detected package manager's parallel-download
+// settings, with a dry-run preview, a pre-change snapshot of each file it touches (so
+// Option [9] Rollback can undo it), and verification that the setting actually landed.
 func TuneMirrorSpeed(client *ssh.Client, targetOS osdetect.TargetOS) {
 	fmt.Println(Cyan + Bold + "\n[+] Running Download Speed & Mirror Optimizer..." + Reset)
+
 	if targetOS == osdetect.OSWindows {
-		winCmd := "powershell -NoProfile -Command \"$env:NETConnection_MaxConnectionsPerServer=10; Write-Output '[SUCCESS] Windows Max Parallel HTTP Connections Tuned to 10!'\""
-		out, _ := executeRemoteCommand(client, winCmd)
-		fmt.Println(Green + out + Reset)
+		tuneWindowsDownloadSpeed(client)
+		return
+	}
+	if targetOS == osdetect.OSMacOS {
+		fmt.Println(Yellow + Bold + "[!] No persistent mirror-speed tuning is implemented for Homebrew yet — Homebrew does not have an equivalent parallel-download config file to tune." + Reset)
 		return
 	}
 
-	ensureAutonomousPermissionsWithPrompt(client)
-	tuneScript := `#!/bin/bash
-if command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
-	if [ -f /etc/dnf/dnf.conf ]; then
-		grep -q "fastestmirror" /etc/dnf/dnf.conf || echo "fastestmirror=True" >> /etc/dnf/dnf.conf
-		grep -q "max_parallel_downloads" /etc/dnf/dnf.conf || echo "max_parallel_downloads=10" >> /etc/dnf/dnf.conf
-	fi
-fi
-exit 0
-`
-	writeCmd := fmt.Sprintf("cat << 'CROSS_TUNE_EOF' > /var/tmp/cross_tune.sh\n%s\nCROSS_TUNE_EOF\nchmod +x /var/tmp/cross_tune.sh", tuneScript)
-	_, _ = executeRemoteCommand(client, writeCmd)
-	_, _ = runSudoScriptWithSpinner(client, "bash /var/tmp/cross_tune.sh", "Optimizing Download Speed & Parallel Mirrors")
-	_, _ = executeRemoteCommand(client, "rm -f /var/tmp/cross_tune.sh")
+	mode := strings.TrimSpace(transfer.ReadRealtimeInput("Type 'dry' to preview changes only, or 'yes' to apply persistently: "))
+	dryRun := !strings.EqualFold(mode, "yes")
 
-	fmt.Println(Green + Bold + "[SUCCESS] Repository mirror download speeds optimized!" + Reset)
+	ensureAutonomousPermissionsWithPrompt(client)
+	exec := repoHealerExecutor{client: client}
+
+	applied := 0
+	for _, target := range mirrorTuneTargets {
+		presentOut, _ := exec.Run(fmt.Sprintf("command -v %s >/dev/null 2>&1 && echo PRESENT || echo ABSENT", strconv.Quote(target.Probe)))
+		if !strings.Contains(presentOut, "PRESENT") {
+			continue
+		}
+
+		fmt.Println(Cyan + fmt.Sprintf("[+] %s detected — target file: %s", target.Manager, target.Path) + Reset)
+		for _, line := range target.EnsureLines {
+			fmt.Println("  + ensure: " + line)
+		}
+
+		if dryRun {
+			continue
+		}
+
+		snapshot, snapErr := repohealer.CreateAPTFileSnapshot(exec, []string{target.Path})
+		if snapErr != nil || !snapshot.Created {
+			fmt.Println(Red + Bold + fmt.Sprintf("[!] Could not snapshot %s before modifying it — skipping this manager for safety: %v", target.Path, snapErr) + Reset)
+			continue
+		}
+
+		var ensureCmds []string
+		for _, line := range target.EnsureLines {
+			ensureCmds = append(ensureCmds, fmt.Sprintf(
+				`grep -qxF %s %s 2>/dev/null || echo %s >> %s`,
+				strconv.Quote(line), strconv.Quote(target.Path),
+				strconv.Quote(line), strconv.Quote(target.Path),
+			))
+		}
+		script := fmt.Sprintf("set -eu\ntouch %s\n%s\n", strconv.Quote(target.Path), strings.Join(ensureCmds, "\n"))
+
+		if _, err := exec.RunSudo(script); err != nil {
+			fmt.Println(Red + Bold + fmt.Sprintf("[!] Failed to update %s: %v — rolling back.", target.Path, err) + Reset)
+			_ = repohealer.RestoreAPTFileSnapshot(exec, snapshot, []string{target.Path})
+			continue
+		}
+
+		verifyOut, _ := exec.Run(fmt.Sprintf("cat %s 2>/dev/null", strconv.Quote(target.Path)))
+		allPresent := true
+		for _, line := range target.EnsureLines {
+			if !strings.Contains(verifyOut, line) {
+				allPresent = false
+				break
+			}
+		}
+		if !allPresent {
+			fmt.Println(Red + Bold + fmt.Sprintf("[!] Verification failed for %s — rolling back.", target.Path) + Reset)
+			_ = repohealer.RestoreAPTFileSnapshot(exec, snapshot, []string{target.Path})
+			continue
+		}
+
+		fmt.Println(Green + Bold + fmt.Sprintf("[SUCCESS] %s tuned persistently (snapshot %s, rollback via Option [9]).", target.Manager, snapshot.ID) + Reset)
+		applied++
+	}
+
+	if dryRun {
+		fmt.Println(Cyan + Bold + "[DRY RUN] No changes were made. Re-run and type 'yes' to apply persistently." + Reset)
+		return
+	}
+	if applied == 0 {
+		fmt.Println(Yellow + "[!] No supported package manager was detected, or no change could be applied safely." + Reset)
+	}
+}
+
+// tuneWindowsDownloadSpeed persistently raises the per-server HTTP connection limit via the
+// real WinINet registry policy (not a process-scoped $env: variable, which never actually
+// affected package-manager downloads) and prints the prior values so they can be restored
+// manually — there is no file-based snapshot mechanism for the registry yet.
+func tuneWindowsDownloadSpeed(client *ssh.Client) {
+	mode := strings.TrimSpace(transfer.ReadRealtimeInput("Type 'dry' to preview the change only, or 'yes' to apply persistently: "))
+	dryRun := !strings.EqualFold(mode, "yes")
+
+	const regPath = `HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings`
+	probeScript := fmt.Sprintf(`
+$before10 = (Get-ItemProperty -Path '%[1]s' -Name MaxConnectionsPerServer -ErrorAction SilentlyContinue).MaxConnectionsPerServer
+$before11 = (Get-ItemProperty -Path '%[1]s' -Name MaxConnectionsPer1_0Server -ErrorAction SilentlyContinue).MaxConnectionsPer1_0Server
+Write-Output "CURRENT_MaxConnectionsPerServer=$before10"
+Write-Output "CURRENT_MaxConnectionsPer1_0Server=$before11"
+`, regPath)
+	before := runWindowsPowerShell(client, probeScript, "Reading current connection-limit registry values")
+	fmt.Println(Cyan + "Current values (save these if you want to revert manually):" + Reset)
+	fmt.Println(before)
+
+	if dryRun {
+		fmt.Println(Cyan + Bold + "[DRY RUN] Would set MaxConnectionsPerServer and MaxConnectionsPer1_0Server to 10 under " + regPath + ". No changes were made." + Reset)
+		return
+	}
+
+	applyScript := fmt.Sprintf(`
+New-Item -Path '%[1]s' -Force | Out-Null
+Set-ItemProperty -Path '%[1]s' -Name MaxConnectionsPerServer -Value 10 -Type DWord
+Set-ItemProperty -Path '%[1]s' -Name MaxConnectionsPer1_0Server -Value 10 -Type DWord
+Write-Output "APPLIED"
+`, regPath)
+	out := runWindowsPowerShell(client, applyScript, "Persistently tuning Windows parallel HTTP connections")
+
+	if strings.Contains(out, "APPLIED") {
+		fmt.Println(Green + Bold + "[SUCCESS] Windows max parallel HTTP connections persistently tuned to 10 (registry policy, survives reboot)." + Reset)
+		fmt.Println(Yellow + "[!] Note: there is no file-based snapshot for this registry change — use the 'Current values' printed above to revert manually if needed." + Reset)
+	} else {
+		fmt.Println(Red + Bold + "[!] Failed to apply the registry change:" + Reset)
+		fmt.Println(out)
+	}
 }
 
 // RollbackSystemState restores pre-repair snapshots
