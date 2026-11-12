@@ -100,6 +100,14 @@ func (e *Engine) Run() Result {
 }
 
 func (e *Engine) detectFacts(platform Platform) (TargetFacts, []CommandEvidence) {
+	return DetectTargetFacts(e.exec, platform)
+}
+
+// DetectTargetFacts runs the same lightweight, read-only package-manager/OS detection probe
+// Engine.Run always starts with, standalone — for callers (e.g. Option 9's "Save a checkpoint
+// now") that only need to know which package manager is present, without running a full
+// diagnose.
+func DetectTargetFacts(exec Executor, platform Platform) (TargetFacts, []CommandEvidence) {
 	facts := TargetFacts{
 		Platform:       platform,
 		PackageManager: ManagerUnknown,
@@ -146,7 +154,7 @@ ps -p 1 -o comm= 2>/dev/null | sed 's/^/init=/'
 `
 
 	started := time.Now()
-	output, err := e.exec.Run(command)
+	output, err := exec.Run(command)
 
 	exitCode := 0
 	if err != nil {

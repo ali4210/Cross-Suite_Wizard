@@ -54,13 +54,13 @@ func ShowUniversalHealerMenu(reader *bufio.Reader, client *ssh.Client, targetOS 
 			fmt.Println("  [6] Inject Custom Private Repository Endpoint (NuGet / Internal Mirror)")
 			fmt.Println("  [7] Autonomous Windows Self-Healer (Flush DNS, Clear Temp Locks, Restart SSHD)")
 			fmt.Println("  [8] Run Parallel Download & Speed Optimizer (PowerShell Parallel Tuning)")
-			fmt.Println("  [9] Rollback System Package & Environment State")
+			fmt.Println("  [9] Snapshot Manager (checkpoint, history, restore, delete old)")
 		} else {
 			fmt.Println("  [5] Enterprise Repo Switcher (Fix EOL CentOS / Enable, Disable & Purge Repos)")
 			fmt.Println("  [6] Inject Custom Private Repository Endpoint (RPM / APT / Nexus Preset Governance)")
 			fmt.Println("  [7] Universal Repository Healer (Diagnose, Plan & Verified Repair)")
 			fmt.Println("  [8] Run Fast-Mirror Benchmark & Auto-Tune Repository Download Speeds")
-			fmt.Println("  [9] Rollback Repository & System Package State (Restore Snapshot)")
+			fmt.Println("  [9] Snapshot Manager (checkpoint, history, restore, delete old)")
 		}
 		fmt.Println(Red + "\n--- SECTION C: DEEP UNINSTALLER & FOOTPRINT PURGER MATRIX ---" + Reset)
 		fmt.Println(Red + "  [10] Deep Package Uninstaller & Orphan Dependency Purger (1-Click Clean)" + Reset)
@@ -104,7 +104,7 @@ func ShowUniversalHealerMenu(reader *bufio.Reader, client *ssh.Client, targetOS 
 			TuneMirrorSpeed(client, targetOS)
 			pauseExecution(reader)
 		case "9":
-			RollbackSystemState(client, targetOS)
+			RunSnapshotManager(client, targetOS)
 			pauseExecution(reader)
 		case "10":
 			toolName := transfer.ReadRealtimeInput("Enter tool/package name to DEEP PURGE (or '0' to Cancel): ")
@@ -3934,15 +3934,26 @@ func RollbackSystemState(client *ssh.Client, targetOS osdetect.TargetOS) {
 			return
 		}
 
+		undoID, undoOK := createWindowsSettingsSnapshot(client, "pre-restore-safety-snapshot")
+		if undoOK {
+			fmt.Println(Cyan + fmt.Sprintf("[+] Safety snapshot of the CURRENT state created first: %s (so this restore can itself be undone).", undoID) + Reset)
+			recordSnapshotHistory(client, "Option 9 [3]", "pre-restore-safety-snapshot", undoID, "", nil, repohealer.ManagerWinget, "", repohealer.SnapshotHistoryResultManualCheckpoint)
+		} else {
+			fmt.Println(Yellow + "[!] Could not create a safety snapshot of the current state — continuing with the restore anyway." + Reset)
+		}
+
 		out := restoreWindowsSettingsSnapshot(client, selected)
 		if strings.TrimSpace(out) != "" {
 			fmt.Println(out)
 		}
+		restoreResult := repohealer.SnapshotHistoryResultFailed
 		if strings.Contains(out, "RESTORED|") {
 			fmt.Println(Green + Bold + fmt.Sprintf("[SUCCESS] Restored settings snapshot %s.", selected.ID) + Reset)
+			restoreResult = repohealer.SnapshotHistoryResultRestored
 		} else {
 			fmt.Println(Red + Bold + "[!] Restore did not report success — review the output above." + Reset)
 		}
+		recordSnapshotHistory(client, "Option 9 [3]", "restore:"+selected.ID, selected.ID, selected.Path, nil, repohealer.ManagerWinget, "", restoreResult)
 		return
 	}
 
@@ -3981,11 +3992,21 @@ func RollbackSystemState(client *ssh.Client, targetOS osdetect.TargetOS) {
 			return
 		}
 
+		undoSnapshot, undoErr := repohealer.CreateHomebrewSnapshot(exec)
+		if undoErr == nil && undoSnapshot.Created {
+			fmt.Println(Cyan + fmt.Sprintf("[+] Safety snapshot of the CURRENT state created first: %s (so this restore can itself be undone).", undoSnapshot.ID) + Reset)
+			recordSnapshotHistory(client, "Option 9 [3]", "pre-restore-safety-snapshot", undoSnapshot.ID, undoSnapshot.Path, []string{undoSnapshot.Path}, repohealer.ManagerHomebrew, "", repohealer.SnapshotHistoryResultManualCheckpoint)
+		} else {
+			fmt.Println(Yellow + fmt.Sprintf("[!] Could not create a safety snapshot of the current state (%v) — continuing with the restore anyway.", undoErr) + Reset)
+		}
+
 		if restoreErr := repohealer.RestoreHomebrewSnapshot(exec, selected); restoreErr != nil {
 			fmt.Println(Red + Bold + fmt.Sprintf("[!] Rollback failed: %v", restoreErr) + Reset)
+			recordSnapshotHistory(client, "Option 9 [3]", "restore:"+selected.ID, selected.ID, selected.Path, []string{selected.Path}, repohealer.ManagerHomebrew, "", repohealer.SnapshotHistoryResultFailed)
 			return
 		}
 		fmt.Println(Green + Bold + fmt.Sprintf("[SUCCESS] Restored Homebrew snapshot %s.", selected.ID) + Reset)
+		recordSnapshotHistory(client, "Option 9 [3]", "restore:"+selected.ID, selected.ID, selected.Path, []string{selected.Path}, repohealer.ManagerHomebrew, "", repohealer.SnapshotHistoryResultRestored)
 		return
 	}
 
@@ -4036,6 +4057,14 @@ func RollbackSystemState(client *ssh.Client, targetOS osdetect.TargetOS) {
 		return
 	}
 
+	undoSnapshot, undoErr := repohealer.CreateAPTFileSnapshot(exec, files)
+	if undoErr == nil && undoSnapshot.Created {
+		fmt.Println(Cyan + fmt.Sprintf("[+] Safety snapshot of the CURRENT state created first: %s (so this restore can itself be undone via Option [9] [3]).", undoSnapshot.ID) + Reset)
+		recordSnapshotHistory(client, "Option 9 [3]", "pre-restore-safety-snapshot", undoSnapshot.ID, undoSnapshot.Path, files, repohealer.ManagerAPT, "", repohealer.SnapshotHistoryResultManualCheckpoint)
+	} else {
+		fmt.Println(Yellow + fmt.Sprintf("[!] Could not create a safety snapshot of the current state (%v) — continuing with the restore anyway.", undoErr) + Reset)
+	}
+
 	snapshot := repohealer.Snapshot{
 		ID:      selected.ID,
 		Path:    "/var/lib/cross-suite/snapshots/" + selected.ID,
@@ -4044,9 +4073,11 @@ func RollbackSystemState(client *ssh.Client, targetOS osdetect.TargetOS) {
 
 	if restoreErr := repohealer.RestoreAPTFileSnapshot(exec, snapshot, files); restoreErr != nil {
 		fmt.Println(Red + Bold + fmt.Sprintf("[!] Rollback failed: %v", restoreErr) + Reset)
+		recordSnapshotHistory(client, "Option 9 [3]", "restore:"+selected.ID, selected.ID, snapshot.Path, files, repohealer.ManagerAPT, "", repohealer.SnapshotHistoryResultFailed)
 		return
 	}
 	fmt.Println(Green + Bold + fmt.Sprintf("[SUCCESS] Restored snapshot %s and re-ran apt-get update to verify the repository state.", selected.ID) + Reset)
+	recordSnapshotHistory(client, "Option 9 [3]", "restore:"+selected.ID, selected.ID, snapshot.Path, files, repohealer.ManagerAPT, "", repohealer.SnapshotHistoryResultRestored)
 }
 
 // repoHealerSnapshotInfo is a listing-friendly summary of a snapshot directory written by
