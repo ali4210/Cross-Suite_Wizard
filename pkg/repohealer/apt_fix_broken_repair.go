@@ -176,13 +176,17 @@ type APTFixBrokenApprovalResult struct {
 	Reason      string
 }
 
-const aptFixBrokenRepairExecutionEnabledEnv = "CROSS_SUITE_FIXBROKEN_REPAIR_ENABLED"
+// APTFixBrokenRepairExecutionEnabledEnv is the operator-policy environment variable that must
+// be set to exactly "true" before the apt --fix-broken install repair is allowed to apply.
+// Exported so callers (e.g. the playbook UI) can show the exact variable name without
+// duplicating the string literal.
+const APTFixBrokenRepairExecutionEnabledEnv = "CROSS_SUITE_FIXBROKEN_REPAIR_ENABLED"
 
 // APTFixBrokenRepairExecutionEnabled is the same kind of operator-policy opt-in every other
 // gated repair in this package requires.
 func APTFixBrokenRepairExecutionEnabled() bool {
 	return strings.EqualFold(
-		strings.TrimSpace(os.Getenv(aptFixBrokenRepairExecutionEnabledEnv)),
+		strings.TrimSpace(os.Getenv(APTFixBrokenRepairExecutionEnabledEnv)),
 		"true",
 	)
 }

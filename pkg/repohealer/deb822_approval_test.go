@@ -39,7 +39,7 @@ func approvedDockerDeb822Executor() *fakeExecutor {
 }
 
 func TestApproveAndApplyDeb822RepairAppliesExactApprovedRequest(t *testing.T) {
-	t.Setenv(deb822RepairExecutionEnabledEnv, "true")
+	t.Setenv(Deb822RepairExecutionEnabledEnv, "true")
 
 	inspection, request := readyDockerDeb822ApprovalInputs(t)
 	exec := approvedDockerDeb822Executor()
@@ -150,7 +150,7 @@ func TestApproveAndApplyDeb822RepairRejectsNonExplicitApproval(t *testing.T) {
 }
 
 func TestApproveAndApplyDeb822RepairAcceptsCaseInsensitiveExplicitApproval(t *testing.T) {
-	t.Setenv(deb822RepairExecutionEnabledEnv, "true")
+	t.Setenv(Deb822RepairExecutionEnabledEnv, "true")
 
 	inspection, request := readyDockerDeb822ApprovalInputs(t)
 
@@ -340,7 +340,7 @@ func TestApproveAndApplyDeb822RepairBlocksUnsafeBindingsWithoutCommands(t *testi
 }
 
 func TestApproveAndApplyDeb822RepairReturnsExecutionFailure(t *testing.T) {
-	t.Setenv(deb822RepairExecutionEnabledEnv, "true")
+	t.Setenv(Deb822RepairExecutionEnabledEnv, "true")
 
 	inspection, request := readyDockerDeb822ApprovalInputs(t)
 	exec := &fakeExecutor{
@@ -390,7 +390,7 @@ func TestApproveAndApplyDeb822RepairReturnsExecutionFailure(t *testing.T) {
 }
 
 func TestApproveAndApplyDeb822RepairBlocksWhenExecutionPolicyIsDisabled(t *testing.T) {
-	t.Setenv(deb822RepairExecutionEnabledEnv, "")
+	t.Setenv(Deb822RepairExecutionEnabledEnv, "")
 
 	inspection, request := readyDockerDeb822ApprovalInputs(t)
 	exec := &fakeExecutor{}
@@ -430,7 +430,7 @@ func TestApproveAndApplyDeb822RepairBlocksWhenExecutionPolicyIsDisabled(t *testi
 }
 
 func TestApproveAndApplyDeb822RepairDeclinesBeforeExecutionPolicyCheck(t *testing.T) {
-	t.Setenv(deb822RepairExecutionEnabledEnv, "")
+	t.Setenv(Deb822RepairExecutionEnabledEnv, "")
 
 	inspection, request := readyDockerDeb822ApprovalInputs(t)
 	exec := &fakeExecutor{}

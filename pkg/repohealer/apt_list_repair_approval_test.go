@@ -8,7 +8,7 @@ import (
 )
 
 func TestApproveAndApplyHashiCorpAPTListRepairDeclinedWithoutExplicitYes(t *testing.T) {
-	t.Setenv(hashicorpAPTListRepairExecutionEnabledEnv, "true")
+	t.Setenv(HashiCorpAPTListRepairExecutionEnabledEnv, "true")
 	preflight := readyHashiCorpAPTListRepairPreflight(t)
 	exec := &fakeExecutor{}
 
@@ -26,7 +26,7 @@ func TestApproveAndApplyHashiCorpAPTListRepairDeclinedWithoutExplicitYes(t *test
 }
 
 func TestApproveAndApplyHashiCorpAPTListRepairBlockedWhenOperatorPolicyDisabled(t *testing.T) {
-	t.Setenv(hashicorpAPTListRepairExecutionEnabledEnv, "false")
+	t.Setenv(HashiCorpAPTListRepairExecutionEnabledEnv, "false")
 	preflight := readyHashiCorpAPTListRepairPreflight(t)
 	exec := &fakeExecutor{}
 
@@ -47,7 +47,7 @@ func TestApproveAndApplyHashiCorpAPTListRepairBlockedWhenOperatorPolicyDisabled(
 }
 
 func TestApproveAndApplyHashiCorpAPTListRepairBlockedWhenPreflightNotReady(t *testing.T) {
-	t.Setenv(hashicorpAPTListRepairExecutionEnabledEnv, "true")
+	t.Setenv(HashiCorpAPTListRepairExecutionEnabledEnv, "true")
 	preflight := HashiCorpAPTListRepairPreflight{
 		Ready:  false,
 		Reason: "required tool \"gpg\" is unavailable",
@@ -68,7 +68,7 @@ func TestApproveAndApplyHashiCorpAPTListRepairBlockedWhenPreflightNotReady(t *te
 }
 
 func TestApproveAndApplyHashiCorpAPTListRepairBlockedOnSafetyGate(t *testing.T) {
-	t.Setenv(hashicorpAPTListRepairExecutionEnabledEnv, "true")
+	t.Setenv(HashiCorpAPTListRepairExecutionEnabledEnv, "true")
 	preflight := readyHashiCorpAPTListRepairPreflight(t)
 	exec := &fakeExecutor{
 		runOutputs:     []string{diskFullNetworkFactsProbeOutput()},
@@ -89,7 +89,7 @@ func TestApproveAndApplyHashiCorpAPTListRepairBlockedOnSafetyGate(t *testing.T) 
 }
 
 func TestApproveAndApplyHashiCorpAPTListRepairAppliesWhenFullyApproved(t *testing.T) {
-	t.Setenv(hashicorpAPTListRepairExecutionEnabledEnv, "true")
+	t.Setenv(HashiCorpAPTListRepairExecutionEnabledEnv, "true")
 	preflight := readyHashiCorpAPTListRepairPreflight(t)
 	exec := &fakeExecutor{
 		runOutputs: []string{safeNetworkFactsProbeOutput()},
@@ -113,7 +113,7 @@ func TestApproveAndApplyHashiCorpAPTListRepairAppliesWhenFullyApproved(t *testin
 }
 
 func TestApproveAndApplyHashiCorpAPTListRepairFailsAndClassifiesRollback(t *testing.T) {
-	t.Setenv(hashicorpAPTListRepairExecutionEnabledEnv, "true")
+	t.Setenv(HashiCorpAPTListRepairExecutionEnabledEnv, "true")
 	preflight := readyHashiCorpAPTListRepairPreflight(t)
 	exec := &fakeExecutor{
 		runOutputs: []string{safeNetworkFactsProbeOutput()},

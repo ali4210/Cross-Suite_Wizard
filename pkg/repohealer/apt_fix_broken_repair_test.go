@@ -140,7 +140,7 @@ func TestApplyAPTFixBrokenRepairBlockedWhenPreviewNotReady(t *testing.T) {
 }
 
 func TestApproveAndApplyAPTFixBrokenRepairRequiresExactPhraseNotBareYes(t *testing.T) {
-	t.Setenv(aptFixBrokenRepairExecutionEnabledEnv, "true")
+	t.Setenv(APTFixBrokenRepairExecutionEnabledEnv, "true")
 
 	got := ApproveAndApplyAPTFixBrokenRepair(&fakeExecutor{}, readyAPTFixBrokenPreview(), "yes")
 
@@ -150,7 +150,7 @@ func TestApproveAndApplyAPTFixBrokenRepairRequiresExactPhraseNotBareYes(t *testi
 }
 
 func TestApproveAndApplyAPTFixBrokenRepairBlockedWhenPolicyDisabled(t *testing.T) {
-	t.Setenv(aptFixBrokenRepairExecutionEnabledEnv, "false")
+	t.Setenv(APTFixBrokenRepairExecutionEnabledEnv, "false")
 
 	got := ApproveAndApplyAPTFixBrokenRepair(&fakeExecutor{}, readyAPTFixBrokenPreview(), aptFixBrokenRepairConfirmation)
 
@@ -163,7 +163,7 @@ func TestApproveAndApplyAPTFixBrokenRepairBlockedWhenPolicyDisabled(t *testing.T
 }
 
 func TestApproveAndApplyAPTFixBrokenRepairAppliesWhenFullyApproved(t *testing.T) {
-	t.Setenv(aptFixBrokenRepairExecutionEnabledEnv, "true")
+	t.Setenv(APTFixBrokenRepairExecutionEnabledEnv, "true")
 	exec := &fakeExecutor{
 		runOutputs:     []string{safeNetworkFactsProbeOutput()},
 		runSudoOutputs: []string{"", ""},
