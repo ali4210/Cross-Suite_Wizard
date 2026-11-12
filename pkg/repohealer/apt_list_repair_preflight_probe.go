@@ -370,10 +370,22 @@ func buildHashiCorpAPTListRepairPreflightProbeScript(
 	sourcePath := shellSingleQuote(request.SourceFile)
 	keyringPath := shellSingleQuote(request.KeyringPath)
 
-	return fmt.Sprintf(`set -eu
+	// Plain string replacement (not fmt.Sprintf) on purpose: this script is full of literal
+	// shell "%" parameter-expansion operators (e.g. the longest-match "%%" in uid=${metadata%%|*}),
+	// and running it through Sprintf would require every one of those to be doubled again to
+	// survive Sprintf's own "%" escaping — exactly the trap that previously corrupted the uid and
+	// sha256 fields real probe output (shortest-match instead of longest-match) without any test
+	// catching it, because the existing tests only fed hand-written output into the parser and
+	// never ran this script for real. See apt_list_repair_preflight_probe_shell_test.go.
+	script := strings.ReplaceAll(hashicorpAPTListRepairPreflightProbeScriptTemplate, "@@SOURCE_PATH@@", sourcePath)
+	script = strings.ReplaceAll(script, "@@KEYRING_PATH@@", keyringPath)
+	return script, nil
+}
+
+const hashicorpAPTListRepairPreflightProbeScriptTemplate = `set -eu
 
 emit() {
-	printf '%%s' "$1"
+	printf '%s' "$1"
 }
 
 emit_line() {
@@ -408,7 +420,7 @@ probe_file() {
 		return
 	fi
 
-	if ! metadata=$(stat -c '%%u|%%a|%%s' -- "$path" 2>/dev/null || stat -f '%%u|%%OLp|%%z' -- "$path" 2>/dev/null); then
+	if ! metadata=$(stat -c '%u|%a|%s' -- "$path" 2>/dev/null || stat -f '%u|%OLp|%z' -- "$path" 2>/dev/null); then
 		emit_line "FILE|$name|unreadable"
 		return
 	fi
@@ -494,10 +506,9 @@ probe_tool "gpg"
 probe_tool "install"
 probe_tool "mv"
 probe_tool "sha256sum"
-probe_file "source" %s
-probe_file "keyring" %s
-probe_lock`, sourcePath, keyringPath), nil
-}
+probe_file "source" @@SOURCE_PATH@@
+probe_file "keyring" @@KEYRING_PATH@@
+probe_lock`
 
 func shellSingleQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
