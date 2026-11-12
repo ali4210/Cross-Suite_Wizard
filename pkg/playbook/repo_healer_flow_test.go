@@ -1,10 +1,53 @@
 package playbook
 
 import (
+	"strings"
 	"testing"
 
 	"cross-ssh/pkg/repohealer"
 )
+
+func TestShouldRouteThroughAPTListRepairFlow(t *testing.T) {
+	tests := []struct {
+		name   string
+		format repohealer.SourceFormat
+		want   bool
+	}{
+		{name: "APT-list routes to the APT-list flow", format: repohealer.SourceFormatAPTList, want: true},
+		{name: "Deb822 does not route to the APT-list flow", format: repohealer.SourceFormatDeb822, want: false},
+		{name: "Unknown format does not route to the APT-list flow", format: repohealer.SourceFormatUnknown, want: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			action := repohealer.RepairAction{SourceFormat: test.format}
+			if got := shouldRouteThroughAPTListRepairFlow(action); got != test.want {
+				t.Fatalf("shouldRouteThroughAPTListRepairFlow(%q) = %t, want %t", test.format, got, test.want)
+			}
+		})
+	}
+}
+
+func TestBlockedRepositoryRepairActionStatusLabelNamesThePath(t *testing.T) {
+	tests := []struct {
+		name     string
+		format   repohealer.SourceFormat
+		contains string
+	}{
+		{name: "APT-list", format: repohealer.SourceFormatAPTList, contains: "APT-list"},
+		{name: "Deb822", format: repohealer.SourceFormatDeb822, contains: "Deb822"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			action := repohealer.RepairAction{SourceFormat: test.format}
+			got := blockedRepositoryRepairActionStatusLabel(action)
+			if !strings.Contains(got, test.contains) {
+				t.Fatalf("status label %q does not name the %s path", got, test.contains)
+			}
+		})
+	}
+}
 
 func TestSelectedRepositoryRepairFlowPolicyBoundaries(t *testing.T) {
 	actions := []repohealer.RepairAction{

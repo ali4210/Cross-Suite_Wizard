@@ -29,7 +29,7 @@ func runSelectedRepositoryRepairFlow(
 	for index, action := range result.Actions {
 		status := "eligible — approval required"
 		if !action.Eligible {
-			status = "blocked"
+			status = blockedRepositoryRepairActionStatusLabel(action)
 		}
 
 		fmt.Printf(
@@ -77,6 +77,11 @@ func runSelectedRepositoryRepairFlow(
 	fmt.Println("\n" + repohealer.FormatRepairAction(selectedAction))
 
 	if !selectedAction.Eligible {
+		if shouldRouteThroughAPTListRepairFlow(selectedAction) {
+			runSelectedAPTListRepairExecutionFlow(client, result, selectedAction)
+			return
+		}
+
 		doctor := repohealer.DiagnoseSelectedDeb822RepairRemoteReadiness(
 			repoHealerExecutor{client: client},
 			result.Target,
@@ -359,4 +364,25 @@ func appendDeb822RepairAudit(
 
 func shouldContinueDeb822RepairAfterPreview(input string) bool {
 	return strings.EqualFold(strings.TrimSpace(input), "a")
+}
+
+// shouldRouteThroughAPTListRepairFlow decides, for a blocked repository repair action, whether
+// it must go through the legacy APT-list Doctor/Preview/Apply path (e.g. HashiCorp's
+// sources.list.d/hashicorp.list) instead of the Deb822 Doctor/Inspection path. A ".list" action
+// must never be diagnosed through the Deb822 readiness report.
+func shouldRouteThroughAPTListRepairFlow(action repohealer.RepairAction) bool {
+	return action.SourceFormat == repohealer.SourceFormatAPTList
+}
+
+// blockedRepositoryRepairActionStatusLabel names which repair path a blocked action will route
+// through, so the Option 7 mode [2] menu makes that explicit before the operator selects it.
+func blockedRepositoryRepairActionStatusLabel(action repohealer.RepairAction) string {
+	switch action.SourceFormat {
+	case repohealer.SourceFormatAPTList:
+		return "blocked — via the APT-list Doctor/Preview/Apply path"
+	case repohealer.SourceFormatDeb822:
+		return "blocked — via the Deb822 Doctor/Inspection path"
+	default:
+		return "blocked"
+	}
 }
