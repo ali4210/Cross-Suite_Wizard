@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -33,6 +34,20 @@ func (e *localScriptExecutor) RunSudoWithLabel(script, label string) (string, er
 	cmd := exec.Command("bash", "-c", script)
 	output, err := cmd.CombinedOutput()
 	return string(output), err
+}
+
+// skipIfNotPOSIX skips tests that model a remote Linux/macOS target's snapshot root
+// (which is always a POSIX absolute path, e.g. /var/lib/cross-suite/snapshots, regardless
+// of what OS the controlling Go binary runs on) against a LOCAL bash executor standing in
+// for that remote host. On a Windows test runner there is neither a POSIX-style t.TempDir()
+// path nor a guaranteed local bash, so this is a genuine "not applicable on this host OS"
+// skip, not a masked failure — the actual snapshot mechanism under test never runs on a
+// native Windows target in production either.
+func skipIfNotPOSIX(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping: this test models a remote POSIX snapshot root via a local bash executor, not applicable on a Windows test runner")
+	}
 }
 
 func writeTestFile(t *testing.T, path string, content []byte, mode os.FileMode) {
@@ -66,6 +81,7 @@ func readTestFile(t *testing.T, path string) ([]byte, os.FileMode) {
 }
 
 func TestAPTSnapshotRestoreRoundTripOnTemporaryFilesystem(t *testing.T) {
+	skipIfNotPOSIX(t)
 	root := t.TempDir()
 	snapshotRoot := filepath.Join(root, "snapshots")
 
@@ -152,6 +168,7 @@ func TestAPTSnapshotRestoreRoundTripOnTemporaryFilesystem(t *testing.T) {
 }
 
 func TestAPTSnapshotRestoreRemovesOriginallyAbsentFileOnTemporaryFilesystem(t *testing.T) {
+	skipIfNotPOSIX(t)
 	root := t.TempDir()
 	snapshotRoot := filepath.Join(root, "snapshots")
 
@@ -213,6 +230,7 @@ func TestAPTSnapshotRestoreRemovesOriginallyAbsentFileOnTemporaryFilesystem(t *t
 }
 
 func TestAPTSnapshotRestoreRejectsTamperedTemporarySnapshot(t *testing.T) {
+	skipIfNotPOSIX(t)
 	root := t.TempDir()
 	snapshotRoot := filepath.Join(root, "snapshots")
 	target := filepath.Join(root, "etc", "apt", "sources.list.d", "docker.list")
