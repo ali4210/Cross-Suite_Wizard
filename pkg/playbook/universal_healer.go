@@ -2292,6 +2292,14 @@ func (e repoHealerExecutor) RunSudoWithLabel(script, label string) (string, erro
 func RunSelfHealingTroubleshooter(client *ssh.Client, targetOS osdetect.TargetOS) {
 	fmt.Println(Cyan + Bold + "\n[+] Launching Universal Repository Healer..." + Reset)
 
+	if targetOS == osdetect.OSWindows {
+		// The repohealer engine's diagnostics are plain POSIX bash sent over the same
+		// Executor used for Linux/macOS, which does not run against a native Windows SSH
+		// target. winget/Chocolatey/Scoop get a dedicated PowerShell-based healer instead.
+		RunWindowsPackageManagerHealer(client)
+		return
+	}
+
 	fmt.Println(Blue + "--------------------------------------------------------------------------------" + Reset)
 	fmt.Println("  [1] Diagnose repository health only (no system changes)")
 	fmt.Println("  [2] Diagnose and apply recognized known-vendor repairs")
