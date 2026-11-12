@@ -83,6 +83,9 @@ find /etc/apt/keyrings /etc/apt/trusted.gpg.d \
 echo '=== DPKG_AUDIT ==='
 dpkg --audit 2>&1
 
+echo '=== HELD_PACKAGES ==='
+apt-mark showhold 2>/dev/null
+
 echo '=== LOCK_OWNERS ==='
 fuser -v /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock \
   /var/lib/apt/lists/lock /var/cache/apt/archives/lock 2>&1 || true
@@ -297,6 +300,66 @@ exit ${PIPESTATUS[0]}
 		})
 	}
 
+	if strings.Contains(lowerUpdate, "expkeysig") {
+		findings = append(findings, Finding{
+			Code:            "APT_REPO_KEY_EXPIRED",
+			Severity:        SeverityError,
+			Risk:            RiskManual,
+			Evidence:        "apt-get update reported an expired repository signing key (EXPKEYSIG).",
+			RecommendedFix:  "Obtain the renewed key from the vendor's official source and replace only that repository's dedicated keyring. Never extend trust for an expired key without confirming it was actually renewed by the vendor.",
+			AutoRepairable:  false,
+			RequiresConsent: true,
+		})
+	}
+
+	if strings.Contains(lowerUpdate, "hash sum mismatch") {
+		findings = append(findings, Finding{
+			Code:            "APT_LISTS_CACHE_CORRUPT",
+			Severity:        SeverityError,
+			Risk:            RiskAutoSafe,
+			Evidence:        "apt-get update reported a Hash Sum mismatch, indicating a corrupted local package lists cache.",
+			RecommendedFix:  "Clear the lists cache and re-fetch it (rm -rf /var/lib/apt/lists/* && apt-get update).",
+			AutoRepairable:  true,
+			RequiresConsent: true,
+		})
+	}
+
+	if strings.Contains(lowerUpdate, "404  not found") || strings.Contains(lowerUpdate, "404 not found") {
+		findings = append(findings, Finding{
+			Code:            "APT_REPO_404",
+			Severity:        SeverityError,
+			Risk:            RiskManual,
+			Evidence:        "apt-get update reported a 404 for one or more repository index files.",
+			RecommendedFix:  "The referenced suite/component may no longer be published at this mirror. Verify the repository is still supported before changing configuration.",
+			AutoRepairable:  false,
+			RequiresConsent: false,
+		})
+	}
+
+	if brokenCount := countAPTInventorySectionLines(inventory, "DPKG_AUDIT"); brokenCount > 0 {
+		findings = append(findings, Finding{
+			Code:            "APT_PACKAGES_BROKEN",
+			Severity:        SeverityWarning,
+			Risk:            RiskManual,
+			Evidence:        fmt.Sprintf("dpkg --audit reported %d package(s) in a broken or inconsistent state.", brokenCount),
+			RecommendedFix:  "Review `dpkg --audit` output, then run `apt --fix-broken install` only after confirming the proposed changes are expected.",
+			AutoRepairable:  false,
+			RequiresConsent: true,
+		})
+	}
+
+	if heldCount := countAPTInventorySectionLines(inventory, "HELD_PACKAGES"); heldCount > 0 {
+		findings = append(findings, Finding{
+			Code:            "APT_PACKAGES_HELD",
+			Severity:        SeverityInfo,
+			Risk:            RiskManual,
+			Evidence:        fmt.Sprintf("%d package(s) are marked on hold (apt-mark showhold), which can be the cause of unmet-dependency errors.", heldCount),
+			RecommendedFix:  "Review `apt-mark showhold` output and only `apt-mark unhold <package>` for packages you intend to let upgrade.",
+			AutoRepairable:  false,
+			RequiresConsent: true,
+		})
+	}
+
 	if strings.TrimSpace(updateOutput) == "" {
 		findings = append(findings, Finding{
 			Code:            "APT_DIAGNOSTIC_INCOMPLETE",
@@ -431,4 +494,28 @@ func repositoryNameFromURL(repositoryURL string) string {
 
 func isMicrosoftVSCodeRepo(repositoryURL string) bool {
 	return strings.HasPrefix(repositoryURL, "https://packages.microsoft.com/repos/code")
+}
+
+// countAPTInventorySectionLines counts non-empty lines inside one of the "=== NAME ==="
+// delimited sections the inventory probe script prints, up to the next such marker (or the
+// end of the inventory).
+func countAPTInventorySectionLines(inventory, section string) int {
+	marker := "=== " + section + " ==="
+	idx := strings.Index(inventory, marker)
+	if idx == -1 {
+		return 0
+	}
+
+	rest := inventory[idx+len(marker):]
+	if next := strings.Index(rest, "=== "); next != -1 {
+		rest = rest[:next]
+	}
+
+	count := 0
+	for _, line := range strings.Split(rest, "\n") {
+		if strings.TrimSpace(line) != "" {
+			count++
+		}
+	}
+	return count
 }
