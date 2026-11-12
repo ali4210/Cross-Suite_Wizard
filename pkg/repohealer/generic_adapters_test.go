@@ -592,6 +592,50 @@ func TestCollectNetworkFactsDetectsDiskFull(t *testing.T) {
 	}
 }
 
+func TestCollectNetworkFactsDiskFullEvidenceShowsRealDfAndCleanupCandidatesButNeverDeletes(t *testing.T) {
+	exec := &fakeExecutor{
+		runOutputs: []string{
+			"=== DNS ===\ngithub.com has address 140.82.112.3\n" +
+				"=== PROXY ===\n" +
+				"=== CLOCK ===\n0\n" +
+				"=== DISK ===\n/dev/sda1 1000000 990000 10000 99% /\n" +
+				"=== CLEANUP ===\n512M\t/var/cache/apt/archives\n" +
+				"120.3M\t/var/log/syslog\n",
+		},
+	}
+
+	_, findings := CollectNetworkFacts(exec)
+
+	var disk Finding
+	for _, finding := range findings {
+		if finding.Code == "NETWORK_DISK_SPACE_LOW" {
+			disk = finding
+		}
+	}
+
+	if !containsCode(findingCodes(findings), "NETWORK_DISK_SPACE_LOW") {
+		t.Fatalf("expected NETWORK_DISK_SPACE_LOW finding, got %v", findingCodes(findings))
+	}
+	if !strings.Contains(disk.Evidence, "/dev/sda1 1000000 990000 10000 99% /") {
+		t.Fatalf("evidence must include the real df -Pk output, got: %s", disk.Evidence)
+	}
+	if !strings.Contains(disk.Evidence, "/var/cache/apt/archives") || !strings.Contains(disk.Evidence, "/var/log/syslog") {
+		t.Fatalf("evidence must list real cleanup candidates, got: %s", disk.Evidence)
+	}
+	if strings.Contains(disk.Evidence, "rm ") || strings.Contains(disk.RecommendedFix, "rm ") {
+		t.Fatalf("disk-full finding must never recommend or perform a deletion, got evidence=%q fix=%q", disk.Evidence, disk.RecommendedFix)
+	}
+	if !strings.Contains(disk.RecommendedFix, "never deletes anything automatically") {
+		t.Fatalf("fix text must state nothing is deleted automatically, got: %s", disk.RecommendedFix)
+	}
+	if len(exec.commands) != 1 {
+		t.Fatalf("disk/cleanup probing must be a single read-only command, got %d: %v", len(exec.commands), exec.commands)
+	}
+	if strings.Contains(exec.commands[0], "RUN:") == false {
+		t.Fatalf("expected the probe to run via the non-sudo Run path, got: %s", exec.commands[0])
+	}
+}
+
 func TestCollectNetworkFactsDetectsDNSFailure(t *testing.T) {
 	exec := &fakeExecutor{
 		runOutputs: []string{

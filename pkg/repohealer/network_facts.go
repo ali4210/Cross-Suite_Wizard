@@ -1,6 +1,7 @@
 package repohealer
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -21,6 +22,10 @@ echo '=== CLOCK ==='
 date -u +%s
 echo '=== DISK ==='
 df -Pk / 2>/dev/null | tail -n 1
+echo '=== CLEANUP ==='
+du -sh /var/cache/apt/archives 2>/dev/null
+find /var/log -type f -printf '%s\t%p\n' 2>/dev/null | sort -rn | head -n 5 \
+  | awk -F'\t' '{printf "%.1fM\t%s\n", $1/1048576, $2}'
 `
 	started := time.Now()
 	output, err := exec.Run(script)
@@ -80,13 +85,23 @@ df -Pk / 2>/dev/null | tail -n 1
 		})
 	}
 
-	if detectDiskFull(sections["DISK"]) {
+	if diskLine := strings.TrimSpace(sections["DISK"]); detectDiskFull(diskLine) {
+		evidence := fmt.Sprintf(
+			"The root filesystem is at or near capacity, which causes package-manager cache/download/unpack "+
+				"failures that look like repository corruption.\ndf -Pk / output: %s",
+			diskLine,
+		)
+		if cleanup := strings.TrimSpace(sections["CLEANUP"]); cleanup != "" {
+			evidence += "\nLargest read-only-identified cleanup candidates (apt cache, largest log files; nothing was deleted):\n" +
+				formatAPTInventoryEvidenceLines(strings.Split(cleanup, "\n"))
+		}
+
 		findings = append(findings, Finding{
 			Code:            "NETWORK_DISK_SPACE_LOW",
 			Severity:        SeverityError,
 			Risk:            RiskManual,
-			Evidence:        "The root filesystem is at or near capacity, which causes package-manager cache/download/unpack failures that look like repository corruption.",
-			RecommendedFix:  "Free up disk space before retrying any repair — package managers fail unpredictably when the disk is full.",
+			Evidence:        evidence,
+			RecommendedFix:  "Free up disk space before retrying any repair (e.g. `apt-get clean`, or remove the largest old logs shown above) — package managers fail unpredictably when the disk is full. This tool never deletes anything automatically.",
 			AutoRepairable:  false,
 			RequiresConsent: false,
 		})

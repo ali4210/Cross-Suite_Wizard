@@ -18,7 +18,7 @@ func TestRunSelfHealingTroubleshooterExposesReadOnlyAPTListDoctorMode(
 
 	for _, required := range []string{
 		`[4] Run remote APT-list Doctor on a discovered blocked HashiCorp action (read-only)`,
-		`Select mode [0-4, default: 1]: `,
+		`Select mode [0-5, default: 1]: `,
 		`if modeChoice == "4" {`,
 		`runSelectedAPTListDoctorRemoteFlow(client, result)`,
 	} {

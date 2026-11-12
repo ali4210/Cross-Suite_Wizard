@@ -342,25 +342,34 @@ exit ${PIPESTATUS[0]}
 		})
 	}
 
-	if brokenCount := countAPTInventorySectionLines(inventory, "DPKG_AUDIT"); brokenCount > 0 {
+	if brokenLines := extractAPTInventorySectionLines(inventory, "DPKG_AUDIT"); len(brokenLines) > 0 {
 		findings = append(findings, Finding{
-			Code:            "APT_PACKAGES_BROKEN",
-			Severity:        SeverityWarning,
-			Risk:            RiskManual,
-			Evidence:        fmt.Sprintf("dpkg --audit reported %d package(s) in a broken or inconsistent state.", brokenCount),
-			RecommendedFix:  "Review `dpkg --audit` output, then run `apt --fix-broken install` only after confirming the proposed changes are expected.",
+			Code:     "APT_PACKAGES_BROKEN",
+			Severity: SeverityWarning,
+			Risk:     RiskManual,
+			Evidence: fmt.Sprintf(
+				"`dpkg --audit` reported %d package(s) in a broken or inconsistent state:\n%s",
+				len(brokenLines),
+				formatAPTInventoryEvidenceLines(brokenLines),
+			),
+			RecommendedFix: "Run `dpkg --audit` yourself to confirm, then only run `apt --fix-broken install` after reviewing its proposed changes " +
+				"(Option 7 offers a gated, snapshot-and-rollback-backed version of this repair).",
 			AutoRepairable:  false,
 			RequiresConsent: true,
 		})
 	}
 
-	if heldCount := countAPTInventorySectionLines(inventory, "HELD_PACKAGES"); heldCount > 0 {
+	if heldLines := extractAPTInventorySectionLines(inventory, "HELD_PACKAGES"); len(heldLines) > 0 {
 		findings = append(findings, Finding{
-			Code:            "APT_PACKAGES_HELD",
-			Severity:        SeverityInfo,
-			Risk:            RiskManual,
-			Evidence:        fmt.Sprintf("%d package(s) are marked on hold (apt-mark showhold), which can be the cause of unmet-dependency errors.", heldCount),
-			RecommendedFix:  "Review `apt-mark showhold` output and only `apt-mark unhold <package>` for packages you intend to let upgrade.",
+			Code:     "APT_PACKAGES_HELD",
+			Severity: SeverityInfo,
+			Risk:     RiskManual,
+			Evidence: fmt.Sprintf(
+				"%d package(s) are marked on hold (`apt-mark showhold`), which can be the cause of unmet-dependency errors:\n%s",
+				len(heldLines),
+				formatAPTInventoryEvidenceLines(heldLines),
+			),
+			RecommendedFix:  "Run `apt-mark showhold` yourself to confirm, then only `apt-mark unhold <package>` for packages you intend to let upgrade. This tool never unholds a package automatically.",
 			AutoRepairable:  false,
 			RequiresConsent: true,
 		})
@@ -506,10 +515,17 @@ func isMicrosoftVSCodeRepo(repositoryURL string) bool {
 // delimited sections the inventory probe script prints, up to the next such marker (or the
 // end of the inventory).
 func countAPTInventorySectionLines(inventory, section string) int {
+	return len(extractAPTInventorySectionLines(inventory, section))
+}
+
+// extractAPTInventorySectionLines returns the actual non-empty lines inside one of the
+// "=== NAME ===" delimited sections the inventory probe script prints, so a Finding can show
+// the real dpkg --audit/apt-mark showhold output rather than only a count.
+func extractAPTInventorySectionLines(inventory, section string) []string {
 	marker := "=== " + section + " ==="
 	idx := strings.Index(inventory, marker)
 	if idx == -1 {
-		return 0
+		return nil
 	}
 
 	rest := inventory[idx+len(marker):]
@@ -517,11 +533,38 @@ func countAPTInventorySectionLines(inventory, section string) int {
 		rest = rest[:next]
 	}
 
-	count := 0
+	var lines []string
 	for _, line := range strings.Split(rest, "\n") {
-		if strings.TrimSpace(line) != "" {
-			count++
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" {
+			lines = append(lines, trimmed)
 		}
 	}
-	return count
+	return lines
+}
+
+// formatAPTInventoryEvidenceLines renders up to a reasonable number of raw inventory lines for
+// inclusion in a Finding's Evidence, noting how many were omitted so the report stays readable
+// without ever hiding that there is more output than shown.
+func formatAPTInventoryEvidenceLines(lines []string) string {
+	const maxShown = 20
+
+	shown := lines
+	truncated := false
+	if len(shown) > maxShown {
+		shown = shown[:maxShown]
+		truncated = true
+	}
+
+	var builder strings.Builder
+	for _, line := range shown {
+		builder.WriteString("    ")
+		builder.WriteString(line)
+		builder.WriteString("\n")
+	}
+	if truncated {
+		builder.WriteString(fmt.Sprintf("    ... %d more line(s) omitted ...\n", len(lines)-maxShown))
+	}
+
+	return strings.TrimRight(builder.String(), "\n")
 }

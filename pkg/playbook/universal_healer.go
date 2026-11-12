@@ -2413,13 +2413,17 @@ func RunSelfHealingTroubleshooter(client *ssh.Client, targetOS osdetect.TargetOS
 	fmt.Println(Blue + "--------------------------------------------------------------------------------" + Reset)
 	fmt.Println("  [1] Diagnose repository health only (no system changes)")
 	fmt.Println("  [2] Diagnose and apply recognized known-vendor repairs")
+	fmt.Println("      (Deb822 sources.d .sources actions: Doctor -> Inspection -> Apply;")
+	fmt.Println("       legacy sources.d .list actions, e.g. HashiCorp: APT-list Doctor -> Preview -> Apply)")
 	fmt.Println("  [3] Run remote Deb822 Doctor on a discovered blocked action (read-only)")
 	fmt.Println("  [4] Run remote APT-list Doctor on a discovered blocked HashiCorp action (read-only)")
+	fmt.Println("  [5] Review and optionally apply a gated 'apt --fix-broken install' repair")
+	fmt.Println("      (preview first; requires explicit typed approval; never unholds packages)")
 	fmt.Println(Red + "  [0] Return to Hub 5 Menu" + Reset)
 	fmt.Println(Blue + "--------------------------------------------------------------------------------" + Reset)
 
 	modeChoice := strings.TrimSpace(
-		transfer.ReadRealtimeInput("Select mode [0-4, default: 1]: "),
+		transfer.ReadRealtimeInput("Select mode [0-5, default: 1]: "),
 	)
 
 	if modeChoice == "" {
@@ -2460,6 +2464,11 @@ func RunSelfHealingTroubleshooter(client *ssh.Client, targetOS osdetect.TargetOS
 
 	if modeChoice == "4" {
 		runSelectedAPTListDoctorRemoteFlow(client, result)
+		return
+	}
+
+	if modeChoice == "5" {
+		runAPTFixBrokenRepairFlow(repoHealerExecutor{client: client})
 		return
 	}
 

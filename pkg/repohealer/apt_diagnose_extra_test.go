@@ -1,6 +1,9 @@
 package repohealer
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestAPTAdapterDiagnoseFindsExpiredKey(t *testing.T) {
 	exec := &fakeExecutor{
@@ -131,6 +134,32 @@ func TestAPTAdapterDiagnoseFindsBrokenAndHeldPackages(t *testing.T) {
 	}
 	if !containsCode(codes, "APT_PACKAGES_HELD") {
 		t.Fatalf("expected APT_PACKAGES_HELD finding, got %v", codes)
+	}
+
+	var broken, held Finding
+	for _, finding := range findings {
+		switch finding.Code {
+		case "APT_PACKAGES_BROKEN":
+			broken = finding
+		case "APT_PACKAGES_HELD":
+			held = finding
+		}
+	}
+
+	for _, want := range []string{"foo is missing files", "bar is half-installed"} {
+		if !strings.Contains(broken.Evidence, want) {
+			t.Fatalf("APT_PACKAGES_BROKEN evidence missing real dpkg --audit line %q, got: %s", want, broken.Evidence)
+		}
+	}
+	if !strings.Contains(broken.RecommendedFix, "apt --fix-broken install") {
+		t.Fatalf("APT_PACKAGES_BROKEN fix must name the exact command, got: %s", broken.RecommendedFix)
+	}
+
+	if !strings.Contains(held.Evidence, "linux-image-amd64") {
+		t.Fatalf("APT_PACKAGES_HELD evidence missing real apt-mark showhold line, got: %s", held.Evidence)
+	}
+	if !strings.Contains(held.RecommendedFix, "apt-mark unhold") {
+		t.Fatalf("APT_PACKAGES_HELD fix must name the exact command, got: %s", held.RecommendedFix)
 	}
 }
 
