@@ -201,6 +201,27 @@ func TestAPKAdapterUntrustedSignatureIsManualOnly(t *testing.T) {
 	}
 }
 
+// Regression test for real apk wording confirmed against a live Alpine container: apk
+// reports "connection refused" / "dns: name does not exist" on an unreachable mirror, not
+// "could not resolve" or "network error" as originally assumed.
+func TestAPKAdapterUnreachableMirrorMatchesRealWording(t *testing.T) {
+	cases := []string{
+		"warning: updating and opening http://127.0.0.1:9/alpine/v3.19/main/x86_64/apkindex.tar.gz: connection refused\n1 unavailable, 0 stale; 16 distinct packages available\n",
+		"warning: updating and opening http://totally-nonexistent-mirror.invalid/alpine/v3.19/main/x86_64/apkindex.tar.gz: dns: name does not exist\n1 unavailable, 0 stale; 16 distinct packages available\n",
+	}
+
+	for _, out := range cases {
+		exec := &fakeExecutor{runSudoOutputs: []string{out}}
+		_, findings, actions := APKAdapter{}.Diagnose(exec, TargetFacts{}, Policy{})
+		if !containsCode(findingCodes(findings), "APK_REPO_UNREACHABLE") {
+			t.Fatalf("output %q: expected APK_REPO_UNREACHABLE finding, got %v", out, findingCodes(findings))
+		}
+		if len(actions) != 0 {
+			t.Fatalf("output %q: unreachable mirror must never produce an auto-repair action, got %+v", out, actions)
+		}
+	}
+}
+
 func TestXBPSAdapterCorruptRepodataProposesResync(t *testing.T) {
 	exec := &fakeExecutor{
 		runSudoOutputs: []string{

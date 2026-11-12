@@ -53,7 +53,13 @@ apk update 2>&1
 			RequiresConsent: true,
 		})
 
-	case strings.Contains(lower, "could not resolve") || strings.Contains(lower, "network error") || strings.Contains(lower, "temporary error"):
+	case strings.Contains(lower, "could not resolve") ||
+		strings.Contains(lower, "network error") ||
+		strings.Contains(lower, "temporary error") ||
+		strings.Contains(lower, "connection refused") ||
+		strings.Contains(lower, "dns:") ||
+		strings.Contains(lower, "name does not exist") ||
+		strings.Contains(lower, "unable to connect"):
 		findings = append(findings, Finding{
 			Code:            "APK_REPO_UNREACHABLE",
 			Severity:        SeverityError,
