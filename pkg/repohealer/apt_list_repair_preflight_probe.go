@@ -408,7 +408,7 @@ probe_file() {
 		return
 	fi
 
-	if ! metadata=$(stat -c '%%u|%%a|%%s' -- "$path" 2>/dev/null); then
+	if ! metadata=$(stat -c '%%u|%%a|%%s' -- "$path" 2>/dev/null || stat -f '%%u|%%OLp|%%z' -- "$path" 2>/dev/null); then
 		emit_line "FILE|$name|unreadable"
 		return
 	fi

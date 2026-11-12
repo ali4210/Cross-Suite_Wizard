@@ -76,7 +76,7 @@ emit_file_state() {
 		return
 	fi
 
-	metadata="$(stat -c '%%u|%%g|%%a|%%s' -- "$target")"
+	metadata="$(stat -c '%%u|%%g|%%a|%%s' -- "$target" 2>/dev/null || stat -f '%%u|%%g|%%OLp|%%z' -- "$target")"
 	IFS='|' read -r uid gid mode size <<EOF_METADATA
 $metadata
 EOF_METADATA

@@ -55,7 +55,7 @@ if [ ! -f "$SOURCE_FILE" ]; then
 	fail not_regular_file
 fi
 
-metadata="$(stat -c '%%u|%%g|%%a|%%s' -- "$SOURCE_FILE")"
+metadata="$(stat -c '%%u|%%g|%%a|%%s' -- "$SOURCE_FILE" 2>/dev/null || stat -f '%%u|%%g|%%OLp|%%z' -- "$SOURCE_FILE")"
 IFS='|' read -r uid gid mode size <<EOF_METADATA
 $metadata
 EOF_METADATA
