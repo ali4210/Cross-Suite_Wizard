@@ -122,6 +122,26 @@ func ShowUniversalHealerMenu(reader *bufio.Reader, client *ssh.Client, targetOS 
 	}
 }
 
+// packageNamePattern rejects shell metacharacters from a user-typed package/tool name before
+// it is embedded into a remote bash script (search queries and install targets), while still
+// allowing the characters real package names commonly use (dots, plus signs, colons, '@').
+var packageNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+:@-]{0,127}$`)
+
+// validatePackageName is the shared guard for Option 1's search query and install target —
+// both get embedded into remote bash scripts (e.g. `apt-cache search -n "^%s"`,
+// `TARGET="%s"`), so an unvalidated value here is the same injection class already closed
+// for the deep uninstaller (validateDeepUninstallToolName) and custom repo URL.
+func validatePackageName(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", fmt.Errorf("package name is empty")
+	}
+	if !packageNamePattern.MatchString(trimmed) {
+		return "", fmt.Errorf("package name %q contains characters that are not allowed", trimmed)
+	}
+	return trimmed, nil
+}
+
 // deepUninstallToolNamePattern restricts deep-uninstall targets to simple identifiers so a
 // crafted or mistyped tool name can never break out of the bash/PowerShell string literal
 // it gets embedded into, or otherwise widen the purge beyond one named application.
@@ -711,6 +731,12 @@ func InspectAndDeployFamily(reader *bufio.Reader, client *ssh.Client, query stri
 		fmt.Println(Yellow + "[!] Operation canceled. Returning to Hub 5 Menu..." + Reset)
 		return
 	}
+	if validated, err := validatePackageName(cleanQuery); err != nil {
+		fmt.Println(Red + Bold + fmt.Sprintf("[!] REJECTED: %s", err) + Reset)
+		return
+	} else {
+		cleanQuery = validated
+	}
 
 	if targetOS != osdetect.OSWindows {
 		ensureAutonomousPermissionsWithPrompt(client)
@@ -754,11 +780,22 @@ func InspectAndDeployFamily(reader *bufio.Reader, client *ssh.Client, query stri
 					for broken in /etc/apt/sources.list.d/*trivy*.list; do
 						[ -f "$broken" ] && mv "$broken" "${broken}.disabled" 2>/dev/null || true
 					done
-					apt-cache search -n "^%s" 2>/dev/null | awk '{print $1}' | head -n 15
+					apt-cache search -n "^%[1]s" 2>/dev/null | awk '{print $1}' | head -n 15
 				elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
-					(dnf --setopt=*.skip_if_unavailable=true search %s 2>/dev/null || yum --setopt=*.skip_if_unavailable=true search %s 2>/dev/null) | grep -iE "^%s" | awk '{print $1}' | head -n 15
+					(dnf --setopt=*.skip_if_unavailable=true search %[1]s 2>/dev/null || yum --setopt=*.skip_if_unavailable=true search %[1]s 2>/dev/null) | grep -iE "^%[1]s" | awk '{print $1}' | head -n 15
+				elif command -v pacman >/dev/null 2>&1; then
+					pacman -Ss "%[1]s" 2>/dev/null | grep -iE "^[^/]*/[^ ]*%[1]s" | awk -F'/' '{print $2}' | awk '{print $1}' | head -n 15
+				elif command -v zypper >/dev/null 2>&1; then
+					zypper --non-interactive search "%[1]s" 2>/dev/null | awk -F'|' '{print $2}' | tr -d ' ' | grep -iE "%[1]s" | head -n 15
+				elif command -v apk >/dev/null 2>&1; then
+					apk search "%[1]s" 2>/dev/null | sed 's/-[0-9][^-]*$//' | head -n 15
+				elif command -v xbps-query >/dev/null 2>&1; then
+					xbps-query -Rs "%[1]s" 2>/dev/null | awk '{print $2}' | sed 's/-[0-9][^-]*$//' | head -n 15
+				elif command -v brew >/dev/null 2>&1; then
+					BREW_USER="${SUDO_USER:-$(logname 2>/dev/null || echo "")}"
+					[ -n "$BREW_USER" ] && sudo -u "$BREW_USER" brew search "%[1]s" 2>/dev/null | head -n 15
 				fi
-			`, cleanQuery, cleanQuery, cleanQuery, cleanQuery)
+			`, cleanQuery)
 
 			out, _ := runSudoScript(client, searchCmd)
 			lines := strings.Split(out, "\n")
@@ -891,6 +928,12 @@ func InspectAndDeployFamily(reader *bufio.Reader, client *ssh.Client, query stri
 // ExecutePortableDeployment performs an idempotent, self-healing multi-layer deployment across Linux or Windows
 func ExecutePortableDeployment(client *ssh.Client, tool string, targetOS osdetect.TargetOS) {
 	cleanTool := strings.Split(tool, ".")[0]
+	if validated, err := validatePackageName(cleanTool); err != nil {
+		fmt.Println(Red + Bold + fmt.Sprintf("[!] REJECTED: %s", err) + Reset)
+		return
+	} else {
+		cleanTool = validated
+	}
 
 	if targetOS == osdetect.OSWindows {
 		executeWindowsDeployment(client, cleanTool)
@@ -1591,8 +1634,23 @@ if [ $INSTALLED -eq 0 ]; then
 		yum install -y --setopt=*.skip_if_unavailable=true "$TOOL_NAME" 2>&1 || true
 	elif command -v pacman >/dev/null 2>&1; then
 		pacman -Sy --noconfirm "$TOOL_NAME" 2>&1 || true
+	elif command -v zypper >/dev/null 2>&1; then
+		zypper --non-interactive install "$TOOL_NAME" 2>&1 || true
 	elif command -v apk >/dev/null 2>&1; then
 		apk add --no-cache "$TOOL_NAME" 2>&1 || true
+	elif command -v xbps-install >/dev/null 2>&1; then
+		xbps-install -Sy "$TOOL_NAME" 2>&1 || true
+	elif command -v emerge >/dev/null 2>&1; then
+		emerge --quiet "$TOOL_NAME" 2>&1 || true
+	elif command -v brew >/dev/null 2>&1; then
+		# Homebrew refuses to run as root; this whole script runs under sudo, so drop
+		# back to the invoking non-root user for this one call.
+		BREW_USER="${SUDO_USER:-$(logname 2>/dev/null || echo "")}"
+		if [ -n "$BREW_USER" ]; then
+			sudo -u "$BREW_USER" brew install "$TOOL_NAME" 2>&1 || true
+		else
+			echo "   [!] Could not determine a non-root user to run 'brew install' as."
+		fi
 	fi
 
 	FOUND_PATH=$(verify_tool)
@@ -1747,6 +1805,40 @@ if [ $INSTALLED -eq 0 ] && command -v snap >/dev/null 2>&1; then
 	snap install "$TOOL_NAME" 2>&1 || true
 	FOUND_PATH=$(verify_tool)
 	[ -n "$FOUND_PATH" ] && INSTALLED=1
+fi
+
+if [ $INSTALLED -eq 0 ] && command -v flatpak >/dev/null 2>&1; then
+	FLATPAK_ID=$(flatpak search "$TOOL_NAME" --columns=application 2>/dev/null | head -n 1)
+	if [ -n "$FLATPAK_ID" ]; then
+		flatpak install -y --noninteractive flathub "$FLATPAK_ID" 2>&1 || true
+		FOUND_PATH=$(verify_tool)
+		[ -n "$FOUND_PATH" ] && INSTALLED=1
+	fi
+fi
+
+# ==============================================================================
+# LAYER 2.6: LANGUAGE PACKAGE MANAGER FALLBACK (pip, npm, cargo)
+# Last-resort for CLI tools distributed as a Python/Node/Rust package rather than
+# a native OS package or a GitHub release binary. Tried in this order because it's
+# the order most CLI tools are actually published in across these ecosystems.
+# ==============================================================================
+if [ $INSTALLED -eq 0 ]; then
+	echo "=> [Layer 2.6] Querying Language Package Managers (pip, npm, cargo)..."
+	if command -v pip3 >/dev/null 2>&1 && pip3 install --user "$TOOL_NAME" >/dev/null 2>&1; then
+		export PATH="$HOME/.local/bin:$PATH"
+	elif command -v pip >/dev/null 2>&1 && pip install --user "$TOOL_NAME" >/dev/null 2>&1; then
+		export PATH="$HOME/.local/bin:$PATH"
+	elif command -v npm >/dev/null 2>&1 && npm install -g "$TOOL_NAME" >/dev/null 2>&1; then
+		:
+	elif command -v cargo >/dev/null 2>&1 && cargo install "$TOOL_NAME" >/dev/null 2>&1; then
+		export PATH="$HOME/.cargo/bin:$PATH"
+	fi
+
+	FOUND_PATH=$(verify_tool)
+	if [ -n "$FOUND_PATH" ]; then
+		ln -sf "$FOUND_PATH" "/usr/local/bin/$TOOL_NAME" 2>/dev/null || true
+		INSTALLED=1
+	fi
 fi
 
 # ==============================================================================
@@ -1923,13 +2015,6 @@ exit 0
 `, cleanTool)
 
 	writeCmd := fmt.Sprintf("cat << 'CROSS_DEPLOY_EOF' > /var/tmp/cross_deploy.sh\n%s\nCROSS_DEPLOY_EOF\nchmod +x /var/tmp/cross_deploy.sh", deployCmd)
-	_, _ = executeRemoteCommand(client, writeCmd)
-	out, _ := runSudoScriptWithSpinner(client, "bash /var/tmp/cross_deploy.sh", fmt.Sprintf("Deploying %s with Root Privileges", cleanTool))
-	_, _ = executeRemoteCommand(client, "rm -f /var/tmp/cross_deploy.sh")
-
-	if strings.TrimSpace(out) != "" {
-		fmt.Println(Yellow + out + Reset)
-	}
 
 	// Step 3: Multi-Binary Strict Functional Verification (1-to-1 Contract)
 	verifyCmd := fmt.Sprintf(`
@@ -1982,12 +2067,31 @@ exit 0
 	fi
 	`, cleanTool)
 
-	vOut, _ := runSudoScript(client, verifyCmd)
+	for attempt := 1; attempt <= 2; attempt++ {
+		_, _ = executeRemoteCommand(client, writeCmd)
+		out, _ := runSudoScriptWithSpinner(client, "bash /var/tmp/cross_deploy.sh", fmt.Sprintf("Deploying %s with Root Privileges", cleanTool))
+		_, _ = executeRemoteCommand(client, "rm -f /var/tmp/cross_deploy.sh")
 
-	if strings.Contains(vOut, "EXISTS") {
-		fmt.Println(Green + Bold + fmt.Sprintf("[SUCCESS] REAL INSTALLATION VERIFIED: '%s' placed on target host filesystem!", cleanTool) + Reset)
-	} else {
-		fmt.Println(Red + Bold + fmt.Sprintf("[!] CRITICAL FAILURE: '%s' binary was not found or is not functional on remote filesystem.", cleanTool) + Reset)
+		if strings.TrimSpace(out) != "" {
+			fmt.Println(Yellow + out + Reset)
+		}
+
+		vOut, _ := runSudoScript(client, verifyCmd)
+		if strings.Contains(vOut, "EXISTS") {
+			fmt.Println(Green + Bold + fmt.Sprintf("[SUCCESS] REAL INSTALLATION VERIFIED: '%s' placed on target host filesystem!", cleanTool) + Reset)
+			return
+		}
+
+		if attempt == 2 {
+			fmt.Println(Red + Bold + fmt.Sprintf("[!] CRITICAL FAILURE: '%s' binary was not found or is not functional on remote filesystem.", cleanTool) + Reset)
+			return
+		}
+
+		fmt.Println(Yellow + fmt.Sprintf("[!] Install of '%s' failed — running the repository doctor to check for a known-safe fix before retrying once...", cleanTool) + Reset)
+		if !attemptAutoSafeRepoRepair(client, targetOS) {
+			fmt.Println(Red + Bold + fmt.Sprintf("[!] CRITICAL FAILURE: '%s' binary was not found or is not functional, and no known-safe automatic repository fix was available.", cleanTool) + Reset)
+			return
+		}
 	}
 }
 
@@ -2037,6 +2141,12 @@ if (-not $installed) {
         choco install $tool -y --no-progress 2>$null
         if (Get-Command $tool -ErrorAction SilentlyContinue) { $installed = $true }
     }
+}
+
+if (-not $installed -and (Get-Command scoop -ErrorAction SilentlyContinue)) {
+    Write-Output "=> [Layer 2.5] Deploying via Scoop..."
+    scoop install $tool 2>$null
+    if (Get-Command $tool -ErrorAction SilentlyContinue) { $installed = $true }
 }
 
 if (-not $installed) {
