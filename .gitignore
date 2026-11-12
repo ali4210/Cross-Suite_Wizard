@@ -1,0 +1,6 @@
+# Built binaries for this module (cmd/cross-ssh, built by autorun.sh/autorun.bat)
+/Cross-Suite_Wizard
+/Cross-Suite_Wizard.exe
+/Cross-Suite_Wizard.debug
+*.exe
+*.debug
