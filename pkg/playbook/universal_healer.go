@@ -85,7 +85,7 @@ func ShowUniversalHealerMenu(reader *bufio.Reader, client *ssh.Client, targetOS 
 			CheckUpstreamUpdates(client, targetOS)
 			pauseExecution(reader)
 		case "4":
-			ScanFootprintCVEs(client)
+			ScanFootprintCVEs(client, targetOS)
 			pauseExecution(reader)
 		case "5":
 			if targetOS == osdetect.OSWindows {
@@ -2540,8 +2540,32 @@ func CheckUpstreamUpdates(client *ssh.Client, targetOS osdetect.TargetOS) {
 	`
 	_, _ = runSudoScript(client, preCheckCmd)
 
-	checkCmd := "if command -v apt-get >/dev/null 2>&1; then apt-get --just-print upgrade 2>/dev/null | grep Inst; elif command -v dnf >/dev/null 2>&1; then dnf check-update --setopt=*.skip_if_unavailable=true 2>/dev/null; else yum check-update --setopt=*.skip_if_unavailable=true 2>/dev/null; fi"
+	checkCmd := `
+if command -v apt-get >/dev/null 2>&1; then
+	apt-get --just-print upgrade 2>/dev/null | grep Inst
+elif command -v dnf >/dev/null 2>&1; then
+	dnf check-update --setopt=*.skip_if_unavailable=true 2>/dev/null
+elif command -v yum >/dev/null 2>&1; then
+	yum check-update --setopt=*.skip_if_unavailable=true 2>/dev/null
+elif command -v pacman >/dev/null 2>&1; then
+	pacman -Sy >/dev/null 2>&1; pacman -Qu 2>/dev/null
+elif command -v zypper >/dev/null 2>&1; then
+	zypper --non-interactive lu 2>/dev/null
+elif command -v apk >/dev/null 2>&1; then
+	apk update >/dev/null 2>&1; apk version -l '<' 2>/dev/null
+elif command -v brew >/dev/null 2>&1; then
+	BREW_USER="${SUDO_USER:-$(logname 2>/dev/null || echo "")}"
+	[ -n "$BREW_USER" ] && sudo -u "$BREW_USER" brew outdated 2>/dev/null
+else
+	echo "UNSUPPORTED_PACKAGE_MANAGER"
+fi
+`
 	out, _ := runSudoScript(client, checkCmd)
+
+	if strings.Contains(out, "UNSUPPORTED_PACKAGE_MANAGER") {
+		fmt.Println(Yellow + Bold + "[!] No supported package manager (apt/dnf/yum/pacman/zypper/apk/brew) was detected on this host — cannot check for updates." + Reset)
+		return
+	}
 
 	if strings.TrimSpace(out) == "" {
 		fmt.Println(Green + Bold + "[SUCCESS] All footprinted tools and system packages are completely up to date!" + Reset)
@@ -2557,7 +2581,24 @@ func CheckUpstreamUpdates(client *ssh.Client, targetOS osdetect.TargetOS) {
 	confirm := transfer.ReadRealtimeInput("Would you like to trigger a 1-Click System & Package Upgrade now? [y/N]: ")
 	if strings.ToLower(confirm) == "y" {
 		fmt.Println(Cyan + Bold + "\n[+] Executing System Upgrade..." + Reset)
-		upgradeCmd := "if command -v apt-get >/dev/null 2>&1; then apt-get update -qq && apt-get upgrade -y; elif command -v dnf >/dev/null 2>&1; then dnf upgrade -y --setopt=*.skip_if_unavailable=true; else yum upgrade -y --setopt=*.skip_if_unavailable=true; fi"
+		upgradeCmd := `
+if command -v apt-get >/dev/null 2>&1; then
+	apt-get update -qq && apt-get upgrade -y
+elif command -v dnf >/dev/null 2>&1; then
+	dnf upgrade -y --setopt=*.skip_if_unavailable=true
+elif command -v yum >/dev/null 2>&1; then
+	yum upgrade -y --setopt=*.skip_if_unavailable=true
+elif command -v pacman >/dev/null 2>&1; then
+	pacman -Syu --noconfirm
+elif command -v zypper >/dev/null 2>&1; then
+	zypper --non-interactive update
+elif command -v apk >/dev/null 2>&1; then
+	apk upgrade
+elif command -v brew >/dev/null 2>&1; then
+	BREW_USER="${SUDO_USER:-$(logname 2>/dev/null || echo "")}"
+	[ -n "$BREW_USER" ] && sudo -u "$BREW_USER" brew upgrade
+fi
+`
 		upOut, err := runSudoScriptWithSpinner(client, upgradeCmd, "Upgrading System & Footprinted Packages")
 		if err == nil {
 			fmt.Println(Green + Bold + "\n[SUCCESS] System packages upgraded successfully!" + Reset)
@@ -2570,8 +2611,13 @@ func CheckUpstreamUpdates(client *ssh.Client, targetOS osdetect.TargetOS) {
 }
 
 // ScanFootprintCVEs uses Trivy to perform real-time CVE scans with disk safeguards & scrollable pager output
-func ScanFootprintCVEs(client *ssh.Client) {
+func ScanFootprintCVEs(client *ssh.Client, targetOS osdetect.TargetOS) {
 	fmt.Println(Cyan + Bold + "\n[+] Initializing Trivy Vulnerability Scanner..." + Reset)
+
+	if targetOS == osdetect.OSWindows {
+		fmt.Println(Yellow + Bold + "[!] Trivy CVE scanning is not supported against a Windows target yet (Trivy's rootfs scan assumes a POSIX filesystem layout)." + Reset)
+		return
+	}
 
 	scanScript := `#!/bin/bash
 if ! command -v trivy >/dev/null 2>&1; then
@@ -2606,7 +2652,7 @@ trivy rootfs --severity HIGH,CRITICAL --pkg-types os / 2>&1
 
 	if strings.Contains(out, "NOT_INSTALLED") {
 		fmt.Println(Yellow + "[!] Trivy binary not found. Auto-deploying Trivy now (Self-Healing)..." + Reset)
-		ExecutePortableDeployment(client, "trivy", osdetect.OSLinux)
+		ExecutePortableDeployment(client, "trivy", targetOS)
 		fmt.Println(Cyan + "[+] Retrying vulnerability scan..." + Reset)
 		out, err = runSudoScriptWithSpinner(client, "bash /var/tmp/cross_trivy_scan.sh", "Scanning Installed Packages for High & Critical Vulnerabilities")
 		if strings.Contains(out, "NOT_INSTALLED") {
