@@ -116,12 +116,20 @@ func RunWindowsPackageManagerHealer(client *ssh.Client) {
 
 	fmt.Println(Red + Bold + "\n[!] APPLY MODE: This will run:" + Reset)
 	fmt.Println(Yellow + selected.Script + Reset)
-	fmt.Println(Yellow + "[!] Note: there is no file-based snapshot for winget/Chocolatey/Scoop state yet, so Option [9] Rollback does not cover this change." + Reset)
+	fmt.Println(Yellow + "[!] A settings snapshot (execution policy, Option 8's registry values, and Chocolatey sources) will be taken before this runs, restorable via Option [9]. Winget sources are captured for reference only — winget has no documented import to automatically restore them." + Reset)
 
 	confirmation := strings.TrimSpace(transfer.ReadRealtimeInput("Type yes to apply this exact fix, or anything else to cancel: "))
 	applied := false
 	var applyOutput string
+	var snapshotID string
 	if strings.EqualFold(confirmation, "yes") {
+		if id, ok := createWindowsSettingsSnapshot(client, "pre-"+selected.ID); ok {
+			snapshotID = id
+			fmt.Println(Cyan + fmt.Sprintf("[+] Pre-change settings snapshot created: %s (rollback via Option [9])", snapshotID) + Reset)
+		} else {
+			fmt.Println(Yellow + "[!] Could not create a pre-change settings snapshot — continuing without one." + Reset)
+		}
+
 		applyOutput = runWindowsPowerShell(client, selected.Script+"\nWrite-Output 'WINDOWS_FIX_DONE'", "Applying: "+selected.Description)
 		applied = strings.Contains(applyOutput, "WINDOWS_FIX_DONE")
 
@@ -157,6 +165,10 @@ func RunWindowsPackageManagerHealer(client *ssh.Client) {
 		RepairAttempted: strings.EqualFold(confirmation, "yes"),
 		Applied:         applied,
 		FailureCategory: failure,
+		SnapshotID:      snapshotID,
+	}
+	if snapshotID != "" {
+		audit.SnapshotPath = windowsSnapshotRoot + `\` + snapshotID
 	}
 	auditPath := repohealer.RepairAuditPath()
 	if err := repohealer.AppendRepairAuditEvent(auditPath, audit); err != nil {

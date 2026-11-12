@@ -3761,6 +3761,13 @@ Write-Output "CURRENT_MaxConnectionsPer1_0Server=$before11"
 		return
 	}
 
+	snapshotID, snapOK := createWindowsSettingsSnapshot(client, "pre-mirror-speed-tune")
+	if snapOK {
+		fmt.Println(Cyan + fmt.Sprintf("[+] Pre-change settings snapshot created: %s (rollback via Option [9])", snapshotID) + Reset)
+	} else {
+		fmt.Println(Yellow + "[!] Could not create a pre-change settings snapshot — continuing without one." + Reset)
+	}
+
 	applyScript := fmt.Sprintf(`
 New-Item -Path '%[1]s' -Force | Out-Null
 Set-ItemProperty -Path '%[1]s' -Name MaxConnectionsPerServer -Value 10 -Type DWord
@@ -3771,7 +3778,6 @@ Write-Output "APPLIED"
 
 	if strings.Contains(out, "APPLIED") {
 		fmt.Println(Green + Bold + "[SUCCESS] Windows max parallel HTTP connections persistently tuned to 10 (registry policy, survives reboot)." + Reset)
-		fmt.Println(Yellow + "[!] Note: there is no file-based snapshot for this registry change — use the 'Current values' printed above to revert manually if needed." + Reset)
 	} else {
 		fmt.Println(Red + Bold + "[!] Failed to apply the registry change:" + Reset)
 		fmt.Println(out)
@@ -3782,57 +3788,86 @@ Write-Output "APPLIED"
 func RollbackSystemState(client *ssh.Client, targetOS osdetect.TargetOS) {
 	fmt.Println(Cyan + Bold + "\n[+] Rolling Back Repository & Package System State..." + Reset)
 	if targetOS == osdetect.OSWindows {
-		checkCmd := "powershell -NoProfile -Command \"Test-Path 'C:\\ProgramData\\cross-suite\\snapshots\\machine-path.snapshot.txt'\""
-		checkOut, _ := executeRemoteCommand(client, checkCmd)
-		if !strings.Contains(checkOut, "True") {
-			fmt.Println(Yellow + Bold + "[!] No pre-repair snapshot found on this Windows host. Windows package-manager repair (winget/Chocolatey/Scoop) does not yet write a snapshot before making changes, so there is nothing to roll back to." + Reset)
+		snapshots := listWindowsSettingsSnapshots(client)
+		if len(snapshots) == 0 {
+			fmt.Println(Yellow + Bold + "[!] No settings snapshot found on this Windows host. Run Option [7] (apply a fix) or Option [8] (mirror speed tune) at least once first to create one." + Reset)
 			return
 		}
 
-		restoreScript := `
-$snapDir = "C:\ProgramData\cross-suite\snapshots"
-$restored = @()
-
-try {
-    if (Test-Path "$snapDir\machine-path.snapshot.txt") {
-        $oldPath = Get-Content "$snapDir\machine-path.snapshot.txt" -Raw
-        [Environment]::SetEnvironmentVariable('Path', $oldPath.Trim(), 'Machine')
-        $restored += "System PATH"
-    }
-} catch {}
-
-try {
-    if (Test-Path "$snapDir\state.json.snapshot") {
-        Copy-Item "$snapDir\state.json.snapshot" "C:\ProgramData\cross-suite\state.json" -Force
-        $restored += "Footprint State Registry"
-    }
-} catch {}
-
-if ($restored.Count -gt 0) {
-    Write-Output ("[SUCCESS] Restored: " + ($restored -join ", "))
-} else {
-    Write-Output "[!] Snapshot files were present but nothing could be restored."
-}
-
-Write-Output "NOTE: winget-list.snapshot.txt and choco-list.snapshot.txt are available at $snapDir for manual package diffing/reinstall, since packages themselves are not auto-reinstalled to avoid destructive side effects."
-`
-		utf16LE := []byte{}
-		for _, r := range restoreScript {
-			utf16LE = append(utf16LE, byte(r), byte(r>>8))
+		fmt.Println(Yellow + "\nAvailable Windows settings snapshots (most recent first):" + Reset)
+		for i, s := range snapshots {
+			fmt.Printf("  [%d] %s  (%s, created %s)\n", i+1, s.ID, s.Label, s.CreatedAt)
 		}
-		b64Cmd := base64.StdEncoding.EncodeToString(utf16LE)
-		winCmd := fmt.Sprintf("powershell -NoProfile -EncodedCommand %s", b64Cmd)
-		out, _ := runSudoScriptWithSpinner(client, winCmd, "Restoring Windows Pre-Repair Snapshot State")
 
+		choice := strings.TrimSpace(transfer.ReadRealtimeInput(fmt.Sprintf("\nSelect a snapshot to restore [1-%d] or '0' to cancel: ", len(snapshots))))
+		idx := 0
+		if _, err := fmt.Sscanf(choice, "%d", &idx); err != nil || idx < 1 || idx > len(snapshots) {
+			fmt.Println(Yellow + "Rollback cancelled." + Reset)
+			return
+		}
+		selected := snapshots[idx-1]
+
+		fmt.Println(Yellow + fmt.Sprintf("\nRestoring snapshot %s will reset: execution policy, the Option [8] connection-limit registry values, and replay Chocolatey's captured sources (additively — existing sources are not removed).", selected.ID) + Reset)
+		fmt.Println(Yellow + "Winget sources will only be printed for reference — there is no documented winget import to restore them automatically." + Reset)
+
+		confirm := strings.ToLower(strings.TrimSpace(transfer.ReadRealtimeInput("Type 'yes' to restore this snapshot, or anything else to cancel: ")))
+		if confirm != "yes" {
+			fmt.Println(Yellow + "Rollback cancelled." + Reset)
+			return
+		}
+
+		out := restoreWindowsSettingsSnapshot(client, selected)
 		if strings.TrimSpace(out) != "" {
-			fmt.Println(Yellow + out + Reset)
+			fmt.Println(out)
 		}
-		fmt.Println(Green + Bold + "[SUCCESS] Windows system rollback completed!" + Reset)
+		if strings.Contains(out, "RESTORED|") {
+			fmt.Println(Green + Bold + fmt.Sprintf("[SUCCESS] Restored settings snapshot %s.", selected.ID) + Reset)
+		} else {
+			fmt.Println(Red + Bold + "[!] Restore did not report success — review the output above." + Reset)
+		}
 		return
 	}
 
 	if targetOS == osdetect.OSMacOS {
-		fmt.Println(Yellow + Bold + "[!] No snapshot/rollback mechanism exists for macOS yet — the self-healer does not snapshot Homebrew state. This will be added when macOS repair adapters are built." + Reset)
+		exec := repoHealerExecutor{client: client}
+
+		snapshots, err := repohealer.ListHomebrewSnapshots(exec)
+		if err != nil {
+			fmt.Println(Red + Bold + fmt.Sprintf("[!] Could not list Homebrew snapshots: %v", err) + Reset)
+			return
+		}
+		if len(snapshots) == 0 {
+			fmt.Println(Yellow + Bold + "[!] No Homebrew snapshot found. Run Option [7] Self-Healer (apply the cache-cleanup fix) at least once first to create one." + Reset)
+			return
+		}
+
+		fmt.Println(Yellow + "\nAvailable Homebrew snapshots (most recent first):" + Reset)
+		for i, s := range snapshots {
+			fmt.Printf("  [%d] %s  (%s)\n", i+1, s.ID, s.Path)
+		}
+
+		choice := strings.TrimSpace(transfer.ReadRealtimeInput(fmt.Sprintf("\nSelect a snapshot to restore [1-%d] or '0' to cancel: ", len(snapshots))))
+		idx := 0
+		if _, scanErr := fmt.Sscanf(choice, "%d", &idx); scanErr != nil || idx < 1 || idx > len(snapshots) {
+			fmt.Println(Yellow + "Rollback cancelled." + Reset)
+			return
+		}
+		selected := snapshots[idx-1]
+
+		fmt.Println(Yellow + fmt.Sprintf("\nRestoring snapshot %s will run `brew bundle install` against the captured Brewfile: it reinstalls any formula/tap/cask the snapshot lists that is currently missing.", selected.ID) + Reset)
+		fmt.Println(Yellow + "Note: this cannot undo a cache cleanup itself (the removed cache files are gone) and will not uninstall anything added since the snapshot — that is how brew bundle always behaves, not a limitation added here." + Reset)
+
+		confirm := strings.ToLower(strings.TrimSpace(transfer.ReadRealtimeInput("Type 'yes' to restore this snapshot, or anything else to cancel: ")))
+		if confirm != "yes" {
+			fmt.Println(Yellow + "Rollback cancelled." + Reset)
+			return
+		}
+
+		if restoreErr := repohealer.RestoreHomebrewSnapshot(exec, selected); restoreErr != nil {
+			fmt.Println(Red + Bold + fmt.Sprintf("[!] Rollback failed: %v", restoreErr) + Reset)
+			return
+		}
+		fmt.Println(Green + Bold + fmt.Sprintf("[SUCCESS] Restored Homebrew snapshot %s.", selected.ID) + Reset)
 		return
 	}
 

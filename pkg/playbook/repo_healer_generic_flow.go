@@ -61,7 +61,9 @@ func runSelectedGenericRepairFlow(client *ssh.Client, result repohealer.Result) 
 	for _, cmd := range selectedAction.Commands {
 		fmt.Println("  $ " + cmd)
 	}
-	if len(selectedAction.SnapshotTargets) > 0 {
+	if selectedAction.UseHomebrewSnapshot {
+		fmt.Println(Yellow + "    A pre-repair Homebrew snapshot (Brewfile) will be created, restorable via Option [9]." + Reset)
+	} else if len(selectedAction.SnapshotTargets) > 0 {
 		fmt.Println(Yellow + "    A pre-repair snapshot will be created for: " + strings.Join(selectedAction.SnapshotTargets, ", ") + Reset)
 	}
 

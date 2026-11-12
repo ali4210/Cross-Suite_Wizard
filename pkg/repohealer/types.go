@@ -118,6 +118,7 @@ type RepairAction struct {
 	RenderedSource       string       `json:"rendered_source,omitempty"`
 	SnapshotTargets      []string     `json:"snapshot_targets,omitempty"`
 	RunAsNonRoot         bool         `json:"run_as_non_root,omitempty"`
+	UseHomebrewSnapshot  bool         `json:"use_homebrew_snapshot,omitempty"`
 }
 
 type Snapshot struct {

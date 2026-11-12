@@ -77,7 +77,14 @@ func applyGenericRepairAction(exec Executor, action RepairAction) RepairResult {
 		runCmd = exec.Run
 	}
 
-	if len(action.SnapshotTargets) > 0 {
+	if action.UseHomebrewSnapshot {
+		snapshot, err := CreateHomebrewSnapshot(exec)
+		result.Snapshot = snapshot
+		if err != nil || !snapshot.Created {
+			result.Error = fmt.Errorf("pre-repair Homebrew snapshot failed: %w", err)
+			return result
+		}
+	} else if len(action.SnapshotTargets) > 0 {
 		snapshot, err := CreateAPTFileSnapshot(exec, action.SnapshotTargets)
 		result.Snapshot = snapshot
 		if err != nil || !snapshot.Created {
@@ -121,6 +128,13 @@ func applyGenericRepairAction(exec Executor, action RepairAction) RepairResult {
 }
 
 func rollbackGenericRepair(exec Executor, action RepairAction, result *RepairResult) {
+	if result.Snapshot.Created && action.UseHomebrewSnapshot {
+		if rbErr := RestoreHomebrewSnapshot(exec, result.Snapshot); rbErr == nil {
+			result.RolledBack = true
+		}
+		return
+	}
+
 	if result.Snapshot.Created {
 		if rbErr := RestoreAPTFileSnapshot(exec, result.Snapshot, action.SnapshotTargets); rbErr == nil {
 			result.RolledBack = true

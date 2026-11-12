@@ -68,16 +68,17 @@ func (HomebrewAdapter) Diagnose(
 
 	if strings.Contains(combined, "warning") || strings.Contains(combined, "outdated") {
 		action := RepairAction{
-			ID:              "brew-cleanup-cache",
-			FindingCode:     "BREW_STALE_CACHE",
-			Risk:            RiskAutoSafe,
-			Description:     "Prune old downloads and outdated cached versions.",
-			Commands:        []string{"brew cleanup -s"},
-			Verification:    []string{"brew doctor"},
-			RequiresConsent: true,
-			Eligible:        true,
-			Target:          facts,
-			RunAsNonRoot:    true,
+			ID:                  "brew-cleanup-cache",
+			FindingCode:         "BREW_STALE_CACHE",
+			Risk:                RiskAutoSafe,
+			Description:         "Prune old downloads and outdated cached versions.",
+			Commands:            []string{"brew cleanup -s"},
+			Verification:        []string{"brew doctor"},
+			RequiresConsent:     true,
+			Eligible:            true,
+			Target:              facts,
+			RunAsNonRoot:        true,
+			UseHomebrewSnapshot: true,
 		}
 		findings = append(findings, Finding{
 			Code:            action.FindingCode,
