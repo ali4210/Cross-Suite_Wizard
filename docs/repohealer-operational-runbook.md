@@ -79,6 +79,28 @@ Disable the policy after the maintenance window:
 unset CROSS_SUITE_DEB822_REPAIR_ENABLED
 ```
 
+### Other gated repairs
+
+The same opt-in-only pattern applies to every other repair in Repo Healer that can modify the
+target. Each has its own independent policy variable — enabling one does not enable another:
+
+| Repair | Policy variable | Example |
+| --- | --- | --- |
+| Deb822 (above) | `CROSS_SUITE_DEB822_REPAIR_ENABLED` | `sudo CROSS_SUITE_DEB822_REPAIR_ENABLED=true ./autorun.sh` |
+| HashiCorp APT-list keyring repair | `CROSS_SUITE_APTLIST_REPAIR_ENABLED` | `sudo CROSS_SUITE_APTLIST_REPAIR_ENABLED=true ./autorun.sh` |
+| `apt --fix-broken install` repair | `CROSS_SUITE_FIXBROKEN_REPAIR_ENABLED` | `sudo CROSS_SUITE_FIXBROKEN_REPAIR_ENABLED=true ./autorun.sh` |
+
+For all three, Repo Healer checks the variable before even showing the apply-confirmation
+prompt and prints the exact variable name and example if it is unset — so an operator never
+types a confirmation only to be rejected by a policy gate it was never told about. Each repair's
+Approve/Apply function independently re-checks the same variable before doing anything, so this
+is a UX improvement only; the underlying gate cannot be bypassed by skipping the pre-check.
+
+The `apt --fix-broken install` repair additionally requires the operator to type the exact
+phrase `FIX BROKEN PACKAGES` (not a bare `yes`/`y`) at its apply-confirmation prompt, because it
+can install, remove, or downgrade packages across the system rather than touching only a
+repository source/keyring pair.
+
 ## Execution audit
 
 Repo Healer persists one redacted JSON Lines audit record for each completed Deb822 approval or execution outcome, including declined, blocked, applied, and failed results.
@@ -131,19 +153,21 @@ Deb822 repair begins in preview mode. Preview validates the inspected source and
 
 Preview mode does not invoke privileged commands, create a target snapshot, modify a source or keyring file, download a key, or run `apt-get update`. Preview remains available even when Deb822 repair execution policy is disabled.
 
-After the preview, Repo Healer exits without changes unless the operator enters exactly `a` to proceed to apply confirmation. Values such as an empty response, `p`, `q`, `no`, `yes`, or `apply` exit after preview and do not reach the apply-confirmation prompt.
+After the preview, Repo Healer exits without changes unless the operator enters `a`, `y`, or `yes` (case-insensitive) to proceed to apply confirmation. An empty response (Enter), `p`, `q`, `no`, or `apply` exit after preview and do not reach the apply-confirmation prompt. `yes` is accepted here specifically so a plain-English "yes" is never silently treated as "exit" at a prompt that reads like a yes/no question — it still only reaches the *next* prompt, not the repair itself.
 
-After entering `a`, the operator must still enter explicit approval (`yes` or `y`) for the displayed repair. Mutation remains disabled unless the local process environment also contains:
+Before showing the apply-confirmation prompt, Repo Healer checks the local operator execution-policy environment variable and, if it is not set to `true`, prints a BLOCKED message naming the exact variable and a ready-to-copy example instead of asking for approval at all:
 
 ```bash
-export CROSS_SUITE_DEB822_REPAIR_ENABLED=true
+sudo CROSS_SUITE_DEB822_REPAIR_ENABLED=true ./autorun.sh
 ```
+
+This is a UX shortcut only — it never weakens the gate. If the policy is enabled, the operator must still enter explicit approval (`yes` or `y`) for the displayed repair, and `ApproveAndApplyDeb822Repair` independently re-checks the same policy variable before doing anything.
 
 This produces three separate controls for a real repair:
 
 1. A safe and bound inspection/request.
 2. An explicit preview-to-apply selection followed by typed approval.
-3. A local operator execution-policy opt-in.
+3. A local operator execution-policy opt-in, checked both before the prompt (for UX) and again inside the apply function itself (the actual gate).
 
 ## Operator procedure
 
@@ -210,6 +234,9 @@ Perform these tests on disposable targets before production rollout:
 - Snapshot checksum validation failure during restore.
 - Explicit `yes` and `y` approval.
 - All non-approval responses.
+- Preview-continue prompt accepting `a`, `y`, and `yes` (case-insensitive) and exiting on Enter.
+- Each gated repair's apply-confirmation prompt skipped, with the exact policy variable and a
+  sudo-safe example shown, when that repair's operator-policy variable is unset.
 
 For each run, record the initial source/keyring state, final state, snapshot information, approval response, repair result, and `apt-get update` outcome.
 

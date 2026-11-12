@@ -57,7 +57,7 @@ func TestDeb822RepairExecutionEnabled(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			t.Setenv(deb822RepairExecutionEnabledEnv, test.value)
+			t.Setenv(Deb822RepairExecutionEnabledEnv, test.value)
 
 			if got := Deb822RepairExecutionEnabled(); got != test.want {
 				t.Fatalf(

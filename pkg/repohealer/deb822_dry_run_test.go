@@ -116,7 +116,7 @@ func TestPreviewDeb822RepairDefensivelyCopiesSlices(t *testing.T) {
 }
 
 func TestPreviewDeb822RepairDoesNotRequireExecutionPolicy(t *testing.T) {
-	t.Setenv(deb822RepairExecutionEnabledEnv, "")
+	t.Setenv(Deb822RepairExecutionEnabledEnv, "")
 
 	inspection, request := readyDockerDeb822ApprovalInputs(t)
 

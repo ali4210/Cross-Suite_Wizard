@@ -15,7 +15,7 @@ func TestDiagnoseDeb822RepairReadinessReadyForKnownProfile(t *testing.T) {
 		"repohealer-deb822-audit.jsonl",
 	)
 	t.Setenv(deb822RepairAuditPathEnv, auditPath)
-	t.Setenv(deb822RepairExecutionEnabledEnv, "true")
+	t.Setenv(Deb822RepairExecutionEnabledEnv, "true")
 
 	report := DiagnoseDeb822RepairReadiness(
 		TargetFacts{
@@ -48,7 +48,7 @@ func TestDiagnoseDeb822RepairReadinessWarnsWhenPolicyDisabled(t *testing.T) {
 		deb822RepairAuditPathEnv,
 		filepath.Join(t.TempDir(), "repohealer-audit.jsonl"),
 	)
-	t.Setenv(deb822RepairExecutionEnabledEnv, "")
+	t.Setenv(Deb822RepairExecutionEnabledEnv, "")
 
 	report := DiagnoseDeb822RepairReadiness(
 		TargetFacts{
@@ -188,7 +188,7 @@ func TestDiagnoseDeb822RepairReadinessDoesNotTreatLegacyProfilePathAsDeb822Path(
 		deb822RepairAuditPathEnv,
 		filepath.Join(t.TempDir(), "repohealer-audit.jsonl"),
 	)
-	t.Setenv(deb822RepairExecutionEnabledEnv, "true")
+	t.Setenv(Deb822RepairExecutionEnabledEnv, "true")
 
 	report := DiagnoseDeb822RepairReadiness(
 		TargetFacts{
@@ -314,7 +314,7 @@ func TestDiagnoseSelectedDeb822RepairReadiness(t *testing.T) {
 				deb822RepairAuditPathEnv,
 				filepath.Join(t.TempDir(), "repohealer-audit.jsonl"),
 			)
-			t.Setenv(deb822RepairExecutionEnabledEnv, "true")
+			t.Setenv(Deb822RepairExecutionEnabledEnv, "true")
 
 			report := DiagnoseSelectedDeb822RepairReadiness(
 				baseAction.Target,
@@ -431,7 +431,7 @@ func TestDiagnoseSelectedDeb822RepairReadinessReplacesGenericSourcePathWarning(t
 		deb822RepairAuditPathEnv,
 		filepath.Join(t.TempDir(), "repohealer-audit.jsonl"),
 	)
-	t.Setenv(deb822RepairExecutionEnabledEnv, "true")
+	t.Setenv(Deb822RepairExecutionEnabledEnv, "true")
 
 	report := DiagnoseSelectedDeb822RepairReadiness(action.Target, action)
 

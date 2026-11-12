@@ -405,7 +405,7 @@ func TestDiagnoseSelectedDeb822RepairRemoteReadiness(t *testing.T) {
 				deb822RepairAuditPathEnv,
 				t.TempDir()+"/repohealer-audit.jsonl",
 			)
-			t.Setenv(deb822RepairExecutionEnabledEnv, "true")
+			t.Setenv(Deb822RepairExecutionEnabledEnv, "true")
 
 			exec := &fakeExecutor{
 				runSudoLabelOutputs: []string{test.output},

@@ -295,15 +295,55 @@ func runSelectedDeb822RepairExecutionFlow(
 
 	mode := strings.TrimSpace(
 		transfer.ReadRealtimeInput(
-			"Type a to continue to apply confirmation, or press Enter to exit after preview: ",
+			"Type a, y, or yes to continue to apply confirmation, or press Enter to exit after preview: ",
 		),
 	)
-	if !shouldContinueDeb822RepairAfterPreview(mode) {
+	if !shouldContinueGatedRepairAfterPreview(mode) {
 		fmt.Println(
 			Yellow +
 				"[PREVIEW COMPLETE] No system changes were made." +
 				Reset,
 		)
+		return
+	}
+
+	if !printOperatorPolicyGateIfDisabled(
+		repohealer.Deb822RepairExecutionEnabledEnv,
+		repohealer.Deb822RepairExecutionEnabled(),
+	) {
+		execution := repohealer.Deb822RepairApprovalResult{
+			Status:      repohealer.Deb822RepairApprovalStatusBlocked,
+			ActionID:    request.ActionID,
+			ProfileID:   request.ProfileID,
+			SourceFile:  request.SourceFile,
+			KeyringPath: request.KeyringPath,
+			Reason: fmt.Sprintf(
+				"Deb822 repair execution is disabled by operator policy; set %s=true only for approved maintenance",
+				repohealer.Deb822RepairExecutionEnabledEnv,
+			),
+		}
+		fmt.Println("\n" + repohealer.FormatDeb822RepairApprovalResult(execution))
+
+		audit := repohealer.BuildDeb822RepairAuditEvent(execution, time.Now())
+		if err := repohealer.AppendDeb822RepairAuditEvent(auditPath, audit); err != nil {
+			fmt.Fprintf(
+				os.Stderr,
+				Yellow+
+					"WARNING: Deb822 repair outcome was completed, but its audit event could not be persisted to %q: %v\n"+
+					Reset,
+				auditPath,
+				err,
+			)
+		} else {
+			fmt.Printf(
+				Cyan+
+					"Audit record written: %s (status=%s failure_category=%s)\n"+
+					Reset,
+				auditPath,
+				audit.Status,
+				audit.FailureCategory,
+			)
+		}
 		return
 	}
 
@@ -362,8 +402,49 @@ func appendDeb822RepairAudit(
 	return repohealer.AppendDeb822RepairAuditEvent(auditPath, audit)
 }
 
-func shouldContinueDeb822RepairAfterPreview(input string) bool {
-	return strings.EqualFold(strings.TrimSpace(input), "a")
+// shouldContinueGatedRepairAfterPreview decides, for the "continue past preview to apply
+// confirmation" prompt shared by every gated repair flow (Deb822, HashiCorp APT-list,
+// fix-broken), whether the operator's response means "continue". It accepts "a", "y", or "yes"
+// case-insensitively; anything else, including an empty (Enter) response, exits after preview
+// with no system changes. Accepting "yes" here does not weaken anything: it only reaches the
+// SAME apply-confirmation prompt that still requires its own separate typed "yes"/"y" before
+// anything is actually applied — it just stops a plain-English "yes" from being silently
+// treated as "exit", which is confusing at a prompt that reads like a yes/no question.
+func shouldContinueGatedRepairAfterPreview(input string) bool {
+	switch strings.ToLower(strings.TrimSpace(input)) {
+	case "a", "y", "yes":
+		return true
+	default:
+		return false
+	}
+}
+
+// printOperatorPolicyGateIfDisabled prints a plain-language BLOCKED message naming the exact
+// operator-policy environment variable and a sudo-safe example command, before the operator is
+// ever asked to type a confirmation that would be rejected anyway. It returns whether the
+// caller may proceed to ask for that confirmation. This is purely a UX improvement — each
+// gated repair's own Approve/Apply function independently re-checks the same policy before
+// doing anything, so skipping the prompt here never weakens the underlying gate.
+func printOperatorPolicyGateIfDisabled(envVar string, enabled bool) bool {
+	if enabled {
+		return true
+	}
+
+	fmt.Println(
+		Yellow +
+			fmt.Sprintf(
+				"[BLOCKED] This repair requires operator policy %s=true. No system changes were made.",
+				envVar,
+			) +
+			Reset,
+	)
+	fmt.Println(
+		Yellow +
+			fmt.Sprintf("  Example: sudo %s=true ./autorun.sh", envVar) +
+			Reset,
+	)
+
+	return false
 }
 
 // shouldRouteThroughAPTListRepairFlow decides, for a blocked repository repair action, whether
