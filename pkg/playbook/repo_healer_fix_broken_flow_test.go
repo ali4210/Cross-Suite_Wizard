@@ -18,7 +18,7 @@ func TestRunSelfHealingTroubleshooterExposesGatedFixBrokenMode(t *testing.T) {
 		`[5] Review and optionally apply a gated 'apt --fix-broken install' repair`,
 		`Select mode [0-5, default: 1]: `,
 		`if modeChoice == "5" {`,
-		`runAPTFixBrokenRepairFlow(repoHealerExecutor{client: client})`,
+		`runAPTFixBrokenRepairFlow(client, repoHealerExecutor{client: client})`,
 	} {
 		if !strings.Contains(code, required) {
 			t.Fatalf(

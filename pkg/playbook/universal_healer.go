@@ -243,6 +243,11 @@ func ExecuteDeepUninstaller(client *ssh.Client, tool string, targetOS osdetect.T
 	}
 
 	ensureAutonomousPermissionsWithPrompt(client)
+	deepUninstallExec := repoHealerExecutor{client: client}
+	configSnapshot, configFiles := snapshotDeepUninstallConfigFiles(deepUninstallExec, cleanTool)
+	if configSnapshot.Created {
+		fmt.Println(Cyan + fmt.Sprintf("[+] Pre-purge config/keyring snapshot created: %s (rollback via Option [9]; the removed package itself is never reinstalled automatically)", configSnapshot.ID) + Reset)
+	}
 
 	purgeScript := fmt.Sprintf(`#!/bin/bash
 export DEBIAN_FRONTEND=noninteractive
@@ -474,13 +479,76 @@ exit 0
 		fmt.Println(Yellow + out + Reset)
 	}
 
+	result := repohealer.SnapshotHistoryResultApplied
 	if strings.Contains(out, "PURGE_VERIFIED") {
 		fmt.Println(Green + Bold + fmt.Sprintf("[SUCCESS] DEEP UNINSTALL COMPLETED: '%s' and all associated packages, keyrings, groups, and traces completely eliminated!", cleanTool) + Reset)
 	} else if strings.Contains(out, "PURGE_INCOMPLETE") {
 		fmt.Println(Red + Bold + fmt.Sprintf("[!] WARNING: A binary footprint for '%s' still exists. Check permissions or manual path overrides.", cleanTool) + Reset)
+		result = repohealer.SnapshotHistoryResultFailed
 	} else {
 		fmt.Println(Green + Bold + fmt.Sprintf("[SUCCESS] Deep Purge operations completed for '%s'.", cleanTool) + Reset)
 	}
+
+	if configSnapshot.Created {
+		recordSnapshotHistory(
+			client,
+			"Option 10",
+			"deep-uninstall:"+cleanTool,
+			configSnapshot.ID,
+			configSnapshot.Path,
+			configFiles,
+			repohealer.ManagerAPT,
+			"",
+			result,
+		)
+	}
+}
+
+// deepUninstallConfigGlob is the set of generic, tool-named config/keyring path patterns the
+// purge script's "Step 3" removes for every tool (a few tools also remove extra alias-named
+// files, like postgresql's "pgdg.*" or hashicorp's files for vault/consul/nomad/terraform/
+// packer, which this generic probe does not separately cover — this is a deliberate, documented
+// simplification rather than re-encoding the full per-tool case statement twice).
+func deepUninstallConfigGlob(tool string) string {
+	return fmt.Sprintf(
+		`/etc/apt/keyrings/%s*.gpg /etc/apt/trusted.gpg.d/%s*.gpg /etc/apt/sources.list.d/%s*.list /etc/yum.repos.d/%s*.repo`,
+		tool, tool, tool, tool,
+	)
+}
+
+// snapshotDeepUninstallConfigFiles probes which of the deep uninstaller's known config/keyring
+// glob targets currently exist for this tool, and — if any do — snapshots exactly those before
+// the purge script runs, so Option 9 can restore the repository configuration afterward. It
+// never snapshots the package binaries/data the purge also removes, and restoring this snapshot
+// never reinstalls the package itself.
+func snapshotDeepUninstallConfigFiles(exec repohealer.Executor, tool string) (repohealer.Snapshot, []string) {
+	probe := fmt.Sprintf(`set +e
+for f in %s; do
+	[ -e "$f" ] && printf '%%s\n' "$f"
+done
+`, deepUninstallConfigGlob(tool))
+
+	out, err := exec.Run(probe)
+	if err != nil {
+		return repohealer.Snapshot{}, nil
+	}
+
+	var files []string
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			files = append(files, line)
+		}
+	}
+	if len(files) == 0 {
+		return repohealer.Snapshot{}, nil
+	}
+
+	snapshot, snapErr := repohealer.CreateAPTFileSnapshot(exec, files)
+	if snapErr != nil || !snapshot.Created {
+		return repohealer.Snapshot{}, nil
+	}
+	return snapshot, files
 }
 
 // executeWindowsDeepUninstall performs a deep system and registry purge on Windows platforms
@@ -2468,7 +2536,7 @@ func RunSelfHealingTroubleshooter(client *ssh.Client, targetOS osdetect.TargetOS
 	}
 
 	if modeChoice == "5" {
-		runAPTFixBrokenRepairFlow(repoHealerExecutor{client: client})
+		runAPTFixBrokenRepairFlow(client, repoHealerExecutor{client: client})
 		return
 	}
 
@@ -3361,7 +3429,13 @@ fi
 
 // recordCustomRepoAudit appends a custom-repo-injection event to the same local audit trail
 // plain APT repairs use (repohealer.RepairAuditPath), so every change Hub 5 makes is traceable.
-func recordCustomRepoAudit(repoURL, keyURL, snapshotID, snapshotPath string, applied bool, failure repohealer.RepairFailureCategory) {
+func recordCustomRepoAudit(
+	client *ssh.Client,
+	repoURL, keyURL, snapshotID, snapshotPath string,
+	filesTouched []string,
+	applied bool,
+	failure repohealer.RepairFailureCategory,
+) {
 	decision := repohealer.ApprovalExecutionExecuted
 	if !applied {
 		decision = repohealer.ApprovalExecutionDeclined
@@ -3384,6 +3458,25 @@ func recordCustomRepoAudit(repoURL, keyURL, snapshotID, snapshotPath string, app
 	} else {
 		fmt.Println(Cyan + fmt.Sprintf("Audit record written: %s", auditPath) + Reset)
 	}
+
+	result := repohealer.SnapshotHistoryResultApplied
+	if !applied {
+		result = repohealer.SnapshotHistoryResultFailed
+		if failure == repohealer.RepairFailureSnapshot {
+			result = repohealer.SnapshotHistoryResultBlocked
+		}
+	}
+	recordSnapshotHistory(
+		client,
+		"Option 6",
+		"custom-repo-injection",
+		snapshotID,
+		snapshotPath,
+		filesTouched,
+		repohealer.ManagerAPT,
+		"",
+		result,
+	)
 }
 
 // InjectCustomRepoIndexed writes uniquely named custom repos with smart .repo vs baseurl
@@ -3412,7 +3505,7 @@ func InjectCustomRepoIndexed(client *ssh.Client, repoURL string, targetOS osdete
 		_, _ = executeRemoteCommand(client, winCmd)
 		fmt.Println(Green + Bold + "[SUCCESS] Windows PowerShell Repository Injected!" + Reset)
 		fmt.Println(Yellow + "[!] Note: a registered PSRepository is not file-based, so there is no snapshot to roll back — remove it manually with Unregister-PSRepository if needed." + Reset)
-		recordCustomRepoAudit(validatedURL, keyURL, "", "", true, repohealer.RepairFailureNone)
+		recordCustomRepoAudit(client, validatedURL, keyURL, "", "", nil, true, repohealer.RepairFailureNone)
 		return
 	}
 
@@ -3440,18 +3533,18 @@ fi
 			if strings.TrimSpace(out) != "" {
 				fmt.Println(Yellow + out + Reset)
 			}
-			recordCustomRepoAudit(validatedURL, keyURL, "", "", false, repohealer.RepairFailureExecution)
+			recordCustomRepoAudit(client, validatedURL, keyURL, "", "", nil, false, repohealer.RepairFailureExecution)
 			return
 		}
 		fmt.Println(Green + Bold + "[SUCCESS] Release repository package installed & active!" + Reset)
-		recordCustomRepoAudit(validatedURL, keyURL, "", "", true, repohealer.RepairFailureNone)
+		recordCustomRepoAudit(client, validatedURL, keyURL, "", "", nil, true, repohealer.RepairFailureNone)
 		return
 	}
 
 	repoFile, isAPT, pathErr := resolveNextCustomRepoFilePath(exec)
 	if pathErr != nil {
 		fmt.Println(Red + Bold + fmt.Sprintf("[!] Could not determine target repo file: %v", pathErr) + Reset)
-		recordCustomRepoAudit(validatedURL, keyURL, "", "", false, repohealer.RepairFailureUnknown)
+		recordCustomRepoAudit(client, validatedURL, keyURL, "", "", nil, false, repohealer.RepairFailureUnknown)
 		return
 	}
 
@@ -3468,7 +3561,7 @@ fi
 	snapshot, snapErr := repohealer.CreateAPTFileSnapshot(exec, snapTargets)
 	if snapErr != nil || !snapshot.Created {
 		fmt.Println(Red + Bold + fmt.Sprintf("[!] Could not create a pre-change snapshot — aborting for safety: %v", snapErr) + Reset)
-		recordCustomRepoAudit(validatedURL, keyURL, "", "", false, repohealer.RepairFailureSnapshot)
+		recordCustomRepoAudit(client, validatedURL, keyURL, "", "", nil, false, repohealer.RepairFailureSnapshot)
 		return
 	}
 	fmt.Println(Cyan + fmt.Sprintf("[+] Pre-change snapshot created: %s (rollback via Option [9])", snapshot.ID) + Reset)
@@ -3548,12 +3641,12 @@ echo "CUSTOM_REPO_OK"
 		if rbErr := repohealer.RestoreAPTFileSnapshot(exec, snapshot, snapTargets); rbErr != nil {
 			fmt.Println(Red + Bold + fmt.Sprintf("[!] Automatic rollback also failed: %v — restore manually via Option [9].", rbErr) + Reset)
 		}
-		recordCustomRepoAudit(validatedURL, keyURL, snapshot.ID, snapshot.Path, false, repohealer.RepairFailureExecution)
+		recordCustomRepoAudit(client, validatedURL, keyURL, snapshot.ID, snapshot.Path, snapTargets, false, repohealer.RepairFailureExecution)
 		return
 	}
 
 	fmt.Println(Green + Bold + "[SUCCESS] Custom Repository Endpoint Injected & Active!" + Reset)
-	recordCustomRepoAudit(validatedURL, keyURL, snapshot.ID, snapshot.Path, true, repohealer.RepairFailureNone)
+	recordCustomRepoAudit(client, validatedURL, keyURL, snapshot.ID, snapshot.Path, snapTargets, true, repohealer.RepairFailureNone)
 }
 
 // InjectCustomRepo writes a standard custom repo endpoint
@@ -3716,6 +3809,7 @@ func TuneMirrorSpeed(client *ssh.Client, targetOS osdetect.TargetOS) {
 		if _, err := exec.RunSudo(script); err != nil {
 			fmt.Println(Red + Bold + fmt.Sprintf("[!] Failed to update %s: %v — rolling back.", target.Path, err) + Reset)
 			_ = repohealer.RestoreAPTFileSnapshot(exec, snapshot, []string{target.Path})
+			recordSnapshotHistory(client, "Option 8", "mirror-speed-tune:"+target.Manager, snapshot.ID, snapshot.Path, []string{target.Path}, repohealer.ManagerAPT, "", repohealer.SnapshotHistoryResultRolledBack)
 			continue
 		}
 
@@ -3730,10 +3824,12 @@ func TuneMirrorSpeed(client *ssh.Client, targetOS osdetect.TargetOS) {
 		if !allPresent {
 			fmt.Println(Red + Bold + fmt.Sprintf("[!] Verification failed for %s — rolling back.", target.Path) + Reset)
 			_ = repohealer.RestoreAPTFileSnapshot(exec, snapshot, []string{target.Path})
+			recordSnapshotHistory(client, "Option 8", "mirror-speed-tune:"+target.Manager, snapshot.ID, snapshot.Path, []string{target.Path}, repohealer.ManagerAPT, "", repohealer.SnapshotHistoryResultRolledBack)
 			continue
 		}
 
 		fmt.Println(Green + Bold + fmt.Sprintf("[SUCCESS] %s tuned persistently (snapshot %s, rollback via Option [9]).", target.Manager, snapshot.ID) + Reset)
+		recordSnapshotHistory(client, "Option 8", "mirror-speed-tune:"+target.Manager, snapshot.ID, snapshot.Path, []string{target.Path}, repohealer.ManagerAPT, "", repohealer.SnapshotHistoryResultApplied)
 		applied++
 	}
 
@@ -3785,12 +3881,25 @@ Write-Output "APPLIED"
 `, regPath)
 	out := runWindowsPowerShell(client, applyScript, "Persistently tuning Windows parallel HTTP connections")
 
+	result := repohealer.SnapshotHistoryResultFailed
 	if strings.Contains(out, "APPLIED") {
 		fmt.Println(Green + Bold + "[SUCCESS] Windows max parallel HTTP connections persistently tuned to 10 (registry policy, survives reboot)." + Reset)
+		result = repohealer.SnapshotHistoryResultApplied
 	} else {
 		fmt.Println(Red + Bold + "[!] Failed to apply the registry change:" + Reset)
 		fmt.Println(out)
 	}
+	recordSnapshotHistory(
+		client,
+		"Option 8",
+		"mirror-speed-tune:windows-registry",
+		snapshotID,
+		"",
+		[]string{regPath},
+		repohealer.ManagerWinget,
+		"",
+		result,
+	)
 }
 
 // RollbackSystemState restores pre-repair snapshots
