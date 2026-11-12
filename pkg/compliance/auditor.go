@@ -4,6 +4,7 @@ import (
 	"bufio"
 
 	"cross-ssh/pkg/osdetect"
+
 	"golang.org/x/crypto/ssh"
 )
 

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"cross-ssh/pkg/transfer"
+
 	"golang.org/x/crypto/ssh"
 )
 
@@ -199,7 +200,16 @@ func pausePrompt() {
 	_ = transfer.ReadRealtimeInput("")
 }
 
+// defaultCommandTimeout is used by executeRemoteCommand for ordinary commands.
+// Heavy operations (large image pulls, GitLab/Wazuh bootstrapping) should call
+// executeRemoteCommandTimeout directly with a longer duration instead of raising this.
+const defaultCommandTimeout = 5 * time.Minute
+
 func executeRemoteCommand(client *ssh.Client, cmd string) (string, error) {
+	return executeRemoteCommandTimeout(client, cmd, defaultCommandTimeout)
+}
+
+func executeRemoteCommandTimeout(client *ssh.Client, cmd string, timeout time.Duration) (string, error) {
 	session, err := client.NewSession()
 	if err != nil {
 		return "", err
@@ -216,10 +226,10 @@ func executeRemoteCommand(client *ssh.Client, cmd string) (string, error) {
 	select {
 	case err := <-errCh:
 		return buf.String(), err
-	case <-time.After(5 * time.Minute):
+	case <-time.After(timeout):
 		session.Signal(ssh.SIGKILL)
 		session.Close()
-		return buf.String(), fmt.Errorf("command timed out after 5m: %s", cmd)
+		return buf.String(), fmt.Errorf("command timed out after %s: %s", timeout, cmd)
 	}
 }
 
@@ -242,6 +252,12 @@ func (l *limitWriter) Write(p []byte) (int, error) {
 }
 
 func executeRemoteCommandWithSpinner(client *ssh.Client, cmd string, label string) (string, error) {
+	return executeRemoteCommandWithSpinnerTimeout(client, cmd, label, defaultCommandTimeout)
+}
+
+// executeRemoteCommandWithSpinnerTimeout is for heavy operations (large image pulls,
+// GitLab/Wazuh bootstrapping) that legitimately need more than the default 5-minute ceiling.
+func executeRemoteCommandWithSpinnerTimeout(client *ssh.Client, cmd string, label string, timeout time.Duration) (string, error) {
 	done := make(chan bool)
 	go func() {
 		spinChars := []string{"|", "/", "-", "\\"}
@@ -259,7 +275,7 @@ func executeRemoteCommandWithSpinner(client *ssh.Client, cmd string, label strin
 		}
 	}()
 
-	out, err := executeRemoteCommand(client, cmd)
+	out, err := executeRemoteCommandTimeout(client, cmd, timeout)
 	done <- true
 	return out, err
 }

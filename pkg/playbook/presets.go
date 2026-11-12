@@ -85,6 +85,12 @@ func handleVolumePersistence(client *ssh.Client, paths []string, serviceName str
 
 	if choice == "2" {
 		purgeCmd := fmt.Sprintf("rm -rf %s", strings.Join(existingPaths, " "))
+		for _, p := range existingPaths {
+			if p == "/var/lib/rancher/k3s" {
+				purgeCmd = "(/usr/local/bin/k3s-uninstall.sh >/dev/null 2>&1 || systemctl stop k3s >/dev/null 2>&1 || true); " + purgeCmd
+				break
+			}
+		}
 		_, _ = runSudoScriptWithSpinner(client, purgeCmd, fmt.Sprintf("Wiping Previous Storage Volumes for %s", serviceName))
 		fmt.Println(Green + Bold + "=> Previous volumes purged. Fresh clean storage initialized!" + Reset)
 	} else {
@@ -250,7 +256,7 @@ func resolveTargetIP(client *ssh.Client) string {
 // sanitizeCommandForWindows prevents Git Bash path rewriting and normalizes Windows line endings
 func sanitizeCommandForWindows(rawBashCmd string) string {
 	clean := strings.ReplaceAll(rawBashCmd, "\r\n", "\n")
-	return "export MSYS_NO_PATHCONV=1 2>/dev/null || true; " + clean
+	return "export MSYS_NO_PATHCONV=1 2>/dev/null || true; export PATH=\"$PATH:/usr/local/bin:/usr/local/sbin:/usr/sbin:/sbin:/usr/bin:/bin\"; " + clean
 }
 
 // runSudoScript executes commands securely using echo password | sudo -S -E bash -c "..."
@@ -268,6 +274,12 @@ func runSudoScript(client *ssh.Client, rawBashCmd string) (string, error) {
 
 // runSudoScriptWithSpinner executes commands with spinner via sudo subshell
 func runSudoScriptWithSpinner(client *ssh.Client, rawBashCmd string, label string) (string, error) {
+	return runSudoScriptWithSpinnerTimeout(client, rawBashCmd, label, 5*time.Minute)
+}
+
+// runSudoScriptWithSpinnerTimeout is for heavy operations that need more than 5 minutes
+// (large image pulls, GitLab/Wazuh bootstrapping, ELK deployment).
+func runSudoScriptWithSpinnerTimeout(client *ssh.Client, rawBashCmd string, label string, timeout time.Duration) (string, error) {
 	sanitizedCmd := sanitizeCommandForWindows(rawBashCmd)
 	cleanCmd := strings.ReplaceAll(sanitizedCmd, "'", "'\"'\"'")
 	var finalCmd string
@@ -276,7 +288,7 @@ func runSudoScriptWithSpinner(client *ssh.Client, rawBashCmd string, label strin
 	} else {
 		finalCmd = fmt.Sprintf("sudo -E bash -c '%s'", cleanCmd)
 	}
-	return executeRemoteCommandWithSpinner(client, finalCmd, label)
+	return executeRemoteCommandWithSpinnerTimeout(client, finalCmd, label, timeout)
 }
 
 // cleanExtractedSecret strips sudo banners, prompts, colons, and trims output
@@ -308,6 +320,29 @@ func EnsureContainerEngine(client *ssh.Client) string {
 	fmt.Println(Cyan + Bold + "\n=> Provisioning Native Docker Engine & Socket..." + Reset)
 	deployDocker(client, "pinned")
 	return "docker"
+}
+
+// ensureImagePulled pre-pulls a Docker image with a generous, isolated timeout,
+// so large images (Elasticsearch, GitLab, Wazuh) never race the 5-minute command ceiling.
+func ensureImagePulled(client *ssh.Client, image string, label string) error {
+	pullCmd := fmt.Sprintf(`
+		if docker image inspect %s >/dev/null 2>&1; then
+			echo "IMAGE_ALREADY_CACHED"
+			exit 0
+		fi
+		for i in 1 2 3; do
+			if timeout 1200 docker pull %s; then
+				echo "IMAGE_PULL_SUCCESS"
+				exit 0
+			fi
+			echo "Pull attempt $i failed or timed out, retrying in 5s..."
+			sleep 5
+		done
+		exit 1
+	`, image, image)
+	// 65 minutes: allows up to 3 pull attempts at 20 min each (bash-level timeout inside pullCmd), plus buffer
+	_, err := runSudoScriptWithSpinnerTimeout(client, pullCmd, fmt.Sprintf("Pre-Pulling Image (up to 20 min per attempt): %s", label), 65*time.Minute)
+	return err
 }
 
 // executeAutonomousDockerRun handles Docker status, stale containers & volume permissions cleanly
@@ -418,6 +453,14 @@ func deployPresetAutonomous(reader *bufio.Reader, client *ssh.Client, preset Pre
 	}
 
 	ensureAutonomousPermissionsWithPrompt(client)
+
+	// Presets that don't run containers via Docker — skip engine provisioning for these
+	switch preset.ID {
+	case "docker", "terraform", "ansible", "trivy", "k3s":
+		// no-op: these either ARE the engine or don't need it
+	default:
+		EnsureContainerEngine(client)
+	}
 
 	fmt.Printf(Cyan+"=> Target Profile Configured: %s (%s)\n"+Reset, versionDesc, versionTag)
 
@@ -602,9 +645,9 @@ func deployNexusAutonomous(client *ssh.Client, port int, targetIP string, imageT
 	fmt.Println(Green + Bold + "==>> SONATYPE NEXUS3 DEPLOYED SUCCESSFULLY!" + Reset)
 	fmt.Printf(Green+Bold+"   => Access URL         : http://%s:%d\n"+Reset, targetIP, port)
 	fmt.Printf(Cyan+Bold+"   => Target Image       : %s\n"+Reset, imageTag)
-	fmt.Printf(Cyan+Bold+"   => Default Username   : admin\n"+Reset)
+	fmt.Printf(Cyan + Bold + "   => Default Username   : admin\n" + Reset)
 	fmt.Printf(Cyan+Bold+"   => Initial Admin Pass : %s\n"+Reset, pass)
-	fmt.Printf(Yellow+Bold+"   => Manual Pass Retrieval: sudo cat /var/nexus-data/admin.password\n"+Reset)
+	fmt.Printf(Yellow + Bold + "   => Manual Pass Retrieval: sudo cat /var/nexus-data/admin.password\n" + Reset)
 	fmt.Println(Green + Bold + "================================================================================" + Reset)
 }
 
@@ -773,6 +816,10 @@ EOF
 	jenkinsCmd := "docker run -d --name cross-jenkins --dns 8.8.8.8 --dns 1.1.1.1 -p 8082:8080 -p 50000:50000 -e 'JAVA_OPTS=-Djenkins.install.runSetupWizard=false -Dhudson.model.DownloadService.noSignatureCheck=true -Dhudson.model.DirectoryBrowserSupport.CSP= -Djava.awt.headless=true' -v /srv/devsecops/jenkins:/var/jenkins_home --restart always jenkins/jenkins:lts"
 	_, _ = executeAutonomousDockerRun(client, "cross-jenkins", jenkinsCmd, "Deploying Jenkins LTS Hardened Core (Port 8082)")
 
+	if err := ensureImagePulled(client, "gitlab/gitlab-ce:16.11.0-ce.0", "GitLab CE 16.11 (Suite)"); err != nil {
+		fmt.Printf(Red+"[!] Failed to pull GitLab image for suite: %v\n"+Reset, err)
+	}
+
 	gitlabCmd := `docker run -d --name cross-gitlab \
 		-p 8929:8929 \
 		-p 2222:22 \
@@ -815,7 +862,7 @@ EOF
 	fmt.Printf(Green+Bold+"   => Grafana Dashboards   : http://%s:3000 (User: admin | Pass: admin)\n"+Reset, targetIP)
 	fmt.Printf(Green+Bold+"   => Prometheus Metrics   : http://%s:9090\n"+Reset, targetIP)
 	fmt.Printf(Green+Bold+"   => Node Exporter Host   : http://%s:9100/metrics (Scraped by Prometheus)\n"+Reset, targetIP)
-	fmt.Printf(Yellow+Bold+"   => Health Verification  : curl -u admin:admin http://localhost:3000/api/datasources/uid/prometheus-default/health\n"+Reset)
+	fmt.Printf(Yellow + Bold + "   => Health Verification  : curl -u admin:admin http://localhost:3000/api/datasources/uid/prometheus-default/health\n" + Reset)
 	fmt.Println(Green + Bold + "================================================================================" + Reset)
 }
 
@@ -1060,11 +1107,11 @@ EOF_REPO
 	fmt.Println(Green + Bold + "\n================================================================================" + Reset)
 	fmt.Println(Green + Bold + "==>> WAZUH INTERCONNECTED SOC SUITE ONLINE!" + Reset)
 	fmt.Printf(Green+Bold+"   => SOC Visualizer UI    : https://%s/app/login (Port 443 / 5601)\n"+Reset, targetIP)
-	fmt.Printf(Cyan+Bold+"   => Default Login        : admin / SecretPassword\n"+Reset)
+	fmt.Printf(Cyan + Bold + "   => Default Login        : admin / SecretPassword\n" + Reset)
 	if agentErr != nil {
-		fmt.Printf(Yellow+Bold+"   => Host Agent Status    : Agent install skipped (Dashboard is fully functional)\n"+Reset)
+		fmt.Printf(Yellow + Bold + "   => Host Agent Status    : Agent install skipped (Dashboard is fully functional)\n" + Reset)
 	} else {
-		fmt.Printf(Cyan+Bold+"   => Host Agent Status    : Active (127.0.0.1:1514)\n"+Reset)
+		fmt.Printf(Cyan + Bold + "   => Host Agent Status    : Active (127.0.0.1:1514)\n" + Reset)
 	}
 	fmt.Println(Green + Bold + "================================================================================" + Reset)
 }
@@ -1172,8 +1219,8 @@ func deployWazuhStandalone(client *ssh.Client, versionTag string) {
 	fmt.Println(Green + Bold + "\n================================================================================" + Reset)
 	fmt.Println(Green + Bold + "==>> WAZUH STANDALONE PLATFORM ONLINE & VERIFIED!" + Reset)
 	fmt.Printf(Green+Bold+"   => Web Dashboard UI     : https://%s/app/login (Port 443 / 5601)\n"+Reset, targetIP)
-	fmt.Printf(Cyan+Bold+"   => Default Username     : admin\n"+Reset)
-	fmt.Printf(Cyan+Bold+"   => Default Password     : SecretPassword\n"+Reset)
+	fmt.Printf(Cyan + Bold + "   => Default Username     : admin\n" + Reset)
+	fmt.Printf(Cyan + Bold + "   => Default Password     : SecretPassword\n" + Reset)
 	fmt.Println(Blue + "--------------------------------------------------------------------------------" + Reset)
 	fmt.Println(Yellow + Bold + "   => [!] STARTUP ADVISORY : Initial dashboard launch takes 1–2 minutes!" + Reset)
 	fmt.Println(Yellow + "      OpenSearch Dashboards compiles plugins & synchronizes internal indices." + Reset)
@@ -1198,48 +1245,132 @@ func deployGitOpsAppSecSuite(client *ssh.Client) {
 	fmt.Println(Green + Bold + "==>> AppSec & GitOps CLOUD-NATIVE STACK DEPLOYED SUCCESSFULLY!" + Reset)
 	fmt.Printf(Green+Bold+"   => ArgoCD GitOps UI     : https://%s:8080 (User: admin)\n"+Reset, targetIP)
 	fmt.Printf(Green+Bold+"   => Vault Secrets Engine : http://%s:8200\n"+Reset, targetIP)
-	fmt.Printf(Green+Bold+"   => K3s K8s Cluster      : Active on Port 6443 (v1.28.8)\n"+Reset)
-	fmt.Printf(Green+Bold+"   => Trivy AppSec Engine  : CLI Available system-wide via 'trivy'\n"+Reset)
+	fmt.Printf(Green + Bold + "   => K3s K8s Cluster      : Active on Port 6443 (v1.28.8)\n" + Reset)
+	fmt.Printf(Green + Bold + "   => Trivy AppSec Engine  : CLI Available system-wide via 'trivy'\n" + Reset)
 	fmt.Println(Green + Bold + "================================================================================" + Reset)
 }
 
 func deployDocker(client *ssh.Client, option string) {
 	isLatest := (option == "latest")
 
-	cmd := fmt.Sprintf(`
+	installCmd := `
 		export DEBIAN_FRONTEND=noninteractive
 		systemctl stop podman.socket 2>/dev/null || true
-		rm -f /var/run/docker.sock
+		rm -f /var/run/docker.sock /run/docker.sock
 
-		if [ "%t" = "true" ]; then
-			curl -fsSL https://get.docker.com | sh 2>/dev/null || true
-		else
-			if command -v apt-get >/dev/null 2>&1; then
-				apt-get update -qq >/dev/null 2>&1
-				apt-get install -y -qq docker.io docker-compose containerd >/dev/null 2>&1 || true
-			elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
-				dnf install -y -q docker docker-compose 2>/dev/null || yum install -y -q docker docker-compose 2>/dev/null || true
+		if command -v apt-get >/dev/null 2>&1; then
+			apt-get update -qq
+			apt-get install -y -qq ca-certificates curl gnupg
+			install -m 0755 -d /etc/apt/keyrings
+			if [ ! -f /etc/apt/keyrings/docker.gpg ]; then
+				curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
 			fi
+			chmod a+r /etc/apt/keyrings/docker.gpg
+
+			. /etc/os-release
+			DOCKER_CODENAME="$VERSION_CODENAME"
+			# Kali and other rolling/derivative distros aren't in Docker's repo list;
+			# fall back to the closest supported Debian base.
+			case "$DOCKER_CODENAME" in
+				bookworm|bullseye|buster) : ;;
+				*) DOCKER_CODENAME="bookworm" ;;
+			esac
+
+			echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $DOCKER_CODENAME stable" \
+				> /etc/apt/sources.list.d/docker.list
+
+			apt-get update -qq
+			apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+		elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
+			dnf install -y -q dnf-plugins-core 2>/dev/null || true
+			dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo 2>/dev/null || \
+			yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo 2>/dev/null || true
+			dnf install -y -q docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin 2>/dev/null || \
+			yum install -y -q docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin 2>/dev/null
+		fi
+
+		if [ "$IS_LATEST" = "true" ]; then
+			apt-get install -y -qq --only-upgrade docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin 2>/dev/null || true
 		fi
 
 		systemctl unmask docker.service docker.socket containerd 2>/dev/null || true
-		systemctl enable --now docker.socket docker.service containerd 2>/dev/null || true
-		systemctl restart docker.service 2>/dev/null || true
+		systemctl enable --now docker.socket docker.service containerd
+		systemctl restart docker.service
 
-		ln -sf /run/docker.sock /var/run/docker.sock 2>/dev/null || true
-		chmod 666 /run/docker.sock /var/run/docker.sock 2>/dev/null || true
-		exit 0
-	`, isLatest)
+		groupadd docker 2>/dev/null || true
+
+		TARGET_USER="${SUDO_USER:-$(logname 2>/dev/null)}"
+		if [ -z "$TARGET_USER" ] || [ "$TARGET_USER" = "root" ]; then
+			TARGET_USER=$(who 2>/dev/null | awk '{print $1}' | grep -v '^root$' | head -n1)
+		fi
+		if [ -z "$TARGET_USER" ] || [ "$TARGET_USER" = "root" ]; then
+			TARGET_USER=$(ls /home 2>/dev/null | head -n1)
+		fi
+
+		if [ -n "$TARGET_USER" ] && [ "$TARGET_USER" != "root" ]; then
+			usermod -aG docker "$TARGET_USER"
+			echo "DOCKER_GROUP_USER_ADDED:$TARGET_USER"
+		else
+			echo "DOCKER_GROUP_USER_FAILED: could not resolve a non-root target user"
+		fi
+
+		chmod 666 /run/docker.sock 2>/dev/null || true
+	`
+
+	fullCmd := fmt.Sprintf("export IS_LATEST=%t\n%s", isLatest, installCmd)
 
 	label := "Deploying Verified Docker Engine & Native Socket"
 	if isLatest {
 		label = "Deploying Live Upstream Docker Engine Release"
 	}
-	_, _ = runSudoScriptWithSpinner(client, cmd, label)
+	installOut, _ := runSudoScriptWithSpinner(client, fullCmd, label)
+
+	var groupStatus string
+	if strings.Contains(installOut, "DOCKER_GROUP_USER_ADDED:") {
+		parts := strings.Split(installOut, "DOCKER_GROUP_USER_ADDED:")
+		addedUser := strings.TrimSpace(strings.Split(parts[1], "\n")[0])
+		groupStatus = fmt.Sprintf("User '%s' added to docker group", addedUser)
+	} else {
+		groupStatus = "Could not confirm docker group assignment - add manually: sudo usermod -aG docker $USER"
+	}
+
+	// REAL verification - retry once before giving up
+	verifyCmd := "command -v docker >/dev/null 2>&1 && systemctl is-active --quiet docker && docker info >/dev/null 2>&1"
+	_, verifyErr := runSudoScript(client, verifyCmd)
+
+	if verifyErr != nil {
+		fmt.Println(Yellow + Bold + "\n=> First verification failed. Retrying Docker service restart..." + Reset)
+		_, _ = runSudoScriptWithSpinner(client, "systemctl daemon-reload; systemctl restart containerd; sleep 2; systemctl restart docker", "Retrying Docker Daemon Startup")
+		time.Sleep(3 * time.Second)
+		_, verifyErr = runSudoScript(client, verifyCmd)
+	}
+
+	if verifyErr != nil {
+		fmt.Println(Red + Bold + "\n================================================================================" + Reset)
+		fmt.Println(Red + Bold + "==>> DOCKER INSTALLATION FAILED VERIFICATION!" + Reset)
+		fmt.Println(Yellow + "   => 'docker' binary, the docker.service, or the daemon socket is not responding." + Reset)
+		fmt.Printf(Yellow+"   => Install log excerpt:\n%s\n"+Reset, installOut)
+		fmt.Println(Cyan + "   => Run manually to see the real error: sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin" + Reset)
+		fmt.Println(Red + Bold + "================================================================================" + Reset)
+		return
+	}
+
+	composeCheckCmd := "docker compose version >/dev/null 2>&1"
+	_, composeErr := runSudoScript(client, composeCheckCmd)
+	composeStatus := Green + "Active (v2 plugin verified)" + Reset
+	if composeErr != nil {
+		composeStatus = Red + "MISSING - 'docker compose' plugin did not install correctly" + Reset
+	}
+
+	verOut, _ := executeRemoteCommand(client, "docker --version 2>/dev/null")
 
 	fmt.Println(Green + Bold + "\n================================================================================" + Reset)
-	fmt.Println(Green + Bold + "==>> DOCKER ENGINE & NATIVE SOCKET CONFIGURED SUCCESSFULLY!" + Reset)
-	fmt.Println(Cyan + Bold + "   => Native Docker Socket : /var/run/docker.sock (Active)" + Reset)
+	fmt.Println(Green + Bold + "==>> DOCKER ENGINE & COMPOSE VERIFIED AND ACTIVE!" + Reset)
+	fmt.Printf(Cyan+Bold+"   => Version            : %s\n"+Reset, strings.TrimSpace(verOut))
+	fmt.Println(Cyan + Bold + "   => Native Docker Socket : /run/docker.sock (Active)" + Reset)
+	fmt.Printf(Cyan+Bold+"   => Docker Compose v2  : %s\n"+Reset, composeStatus)
+	fmt.Printf(Cyan+Bold+"   => Docker Group Access: %s\n"+Reset, groupStatus)
+	fmt.Println(Yellow + Bold + "   => Run 'newgrp docker' now, OR fully log out and log back in (a new terminal window is NOT enough on desktop sessions)." + Reset)
 	fmt.Println(Green + Bold + "================================================================================" + Reset)
 }
 
@@ -1338,7 +1469,7 @@ EOF
 	fmt.Println(Green + Bold + "==>> JENKINS AUTOMATION SERVER DEPLOYED SUCCESSFULLY!" + Reset)
 	fmt.Printf(Green+Bold+"   => Access URL         : http://%s:%d\n"+Reset, targetIP, port)
 	fmt.Printf(Cyan+Bold+"   => Image Tag          : %s\n"+Reset, imageTag)
-	fmt.Printf(Cyan+Bold+"   => Administrator User : admin\n"+Reset)
+	fmt.Printf(Cyan + Bold + "   => Administrator User : admin\n" + Reset)
 	fmt.Printf(Cyan+Bold+"   => Active Password    : %s\n"+Reset, activePassword)
 	fmt.Println(Green + Bold + "================================================================================" + Reset)
 }
@@ -1390,6 +1521,11 @@ chmod 600 /srv/gitlab/config/gitlab.rb
 		fi
 	`, port, port)
 	_, _ = runSudoScriptWithSpinner(client, fwCmd, "Configuring Host Firewall Rules")
+
+	if err := ensureImagePulled(client, imageTag, "GitLab CE "+imageTag); err != nil {
+		fmt.Printf(Red+"[!] Failed to pull GitLab image after 3 attempts: %v\n"+Reset, err)
+		return
+	}
 
 	gitlabRunCmd := fmt.Sprintf(`docker run -d --name cross-gitlab \
 		-p %d:%d \
@@ -1518,10 +1654,10 @@ EOF
 	fmt.Println(Green + Bold + "\n================================================================================" + Reset)
 	fmt.Println(Green + Bold + "==>> GITLAB CE DEPLOYED & FULLY SYNCHRONIZED!" + Reset)
 	fmt.Printf(Green+Bold+"   => Access URL         : http://%s:%d\n"+Reset, targetIP, port)
-	fmt.Printf(Cyan+Bold+"   => Administrator User : root\n"+Reset)
+	fmt.Printf(Cyan + Bold + "   => Administrator User : root\n" + Reset)
 	fmt.Printf(Cyan+Bold+"   => Active Password    : %s\n"+Reset, activePassword)
-	fmt.Printf(Yellow+Bold+"   => Admin PAT Token    : glpat-AdminRootSecretToken123\n"+Reset)
-	fmt.Printf(Yellow+Bold+"   => SSH Git Remote Port: 2222\n"+Reset)
+	fmt.Printf(Yellow + Bold + "   => Admin PAT Token    : glpat-AdminRootSecretToken123\n" + Reset)
+	fmt.Printf(Yellow + Bold + "   => SSH Git Remote Port: 2222\n" + Reset)
 	fmt.Println(Green + Bold + "================================================================================" + Reset)
 }
 
@@ -1543,8 +1679,8 @@ func deploySonarQube(client *ssh.Client, port int, targetIP string, imageTag str
 	fmt.Println(Green + Bold + "==>> SONARQUBE DEPLOYED SUCCESSFULLY!" + Reset)
 	fmt.Printf(Green+Bold+"   => Access URL         : http://%s:%d\n"+Reset, targetIP, port)
 	fmt.Printf(Cyan+Bold+"   => Image Tag          : %s\n"+Reset, imageTag)
-	fmt.Printf(Cyan+Bold+"   => Default Username   : admin\n"+Reset)
-	fmt.Printf(Cyan+Bold+"   => Default Password   : admin\n"+Reset)
+	fmt.Printf(Cyan + Bold + "   => Default Username   : admin\n" + Reset)
+	fmt.Printf(Cyan + Bold + "   => Default Password   : admin\n" + Reset)
 	fmt.Println(Green + Bold + "================================================================================" + Reset)
 }
 
@@ -1643,8 +1779,8 @@ EOF
 	fmt.Println(Green + Bold + "\n================================================================================" + Reset)
 	fmt.Println(Green + Bold + "==>> PROMETHEUS & GRAFANA STACK DEPLOYED & INTERCONNECTED!" + Reset)
 	fmt.Printf(Green+Bold+"   => Grafana Dashboard  : http://%s:%d\n"+Reset, targetIP, port)
-	fmt.Printf(Cyan+Bold+"   => Default Login      : admin / admin\n"+Reset)
-	fmt.Printf(Cyan+Bold+"   => Auto-Wired Source  : Prometheus (http://127.0.0.1:9090 - Default)\n"+Reset)
+	fmt.Printf(Cyan + Bold + "   => Default Login      : admin / admin\n" + Reset)
+	fmt.Printf(Cyan + Bold + "   => Auto-Wired Source  : Prometheus (http://127.0.0.1:9090 - Default)\n" + Reset)
 	fmt.Printf(Green+Bold+"   => Prometheus Engine  : http://%s:9090\n"+Reset, targetIP)
 	fmt.Println(Green + Bold + "================================================================================" + Reset)
 }
@@ -1678,6 +1814,15 @@ func deployELK(client *ssh.Client, port int, targetIP string, version string) {
 		fi
 	`, port, port)
 	_, _ = runSudoScriptWithSpinner(client, preCmd, "Configuring Kernel Subsystem, Firewall & Volumes")
+
+	if err := ensureImagePulled(client, esImage, "Elasticsearch "+esImage); err != nil {
+		fmt.Printf(Red+"[!] Failed to pull Elasticsearch image after 3 attempts: %v\n"+Reset, err)
+		return
+	}
+	if err := ensureImagePulled(client, kibImage, "Kibana "+kibImage); err != nil {
+		fmt.Printf(Red+"[!] Failed to pull Kibana image after 3 attempts: %v\n"+Reset, err)
+		return
+	}
 
 	esRunCmd := fmt.Sprintf("docker run -d --name cross-elasticsearch --network host -e discovery.type=single-node -e xpack.security.enabled=true -e xpack.security.http.ssl.enabled=false -e ELASTIC_PASSWORD=%s -e ES_JAVA_OPTS='-Xms512m -Xmx1024m' -v /var/elasticsearch_data:/usr/share/elasticsearch/data --restart always %s", masterPass, esImage)
 	_, err := executeAutonomousDockerRun(client, "cross-elasticsearch", esRunCmd, fmt.Sprintf("Deploying Authenticated Elasticsearch Core Node (%s)", esImage))
@@ -1767,7 +1912,7 @@ func deployELK(client *ssh.Client, port int, targetIP string, version string) {
 	fmt.Println(Green + Bold + "==>> SECURED ELK STACK DEPLOYED & INTERCONNECTED SUCCESSFULLY!" + Reset)
 	fmt.Printf(Green+Bold+"   => Kibana Web Dashboard : http://%s:%d\n"+Reset, targetIP, port)
 	fmt.Printf(Green+Bold+"   => Elasticsearch REST   : http://%s:9200\n"+Reset, targetIP)
-	fmt.Printf(Cyan+Bold+"   => Superuser Username   : elastic\n"+Reset)
+	fmt.Printf(Cyan + Bold + "   => Superuser Username   : elastic\n" + Reset)
 	fmt.Printf(Cyan+Bold+"   => Master Password      : %s\n"+Reset, masterPass)
 	fmt.Println(Green + Bold + "================================================================================" + Reset)
 }
@@ -1811,9 +1956,9 @@ func deployVault(client *ssh.Client, port int, targetIP string, imageTag string)
 	fmt.Println(Green + Bold + "\n================================================================================" + Reset)
 	fmt.Println(Green + Bold + "==>> HASHICORP VAULT DEPLOYED SUCCESSFULLY (PERSISTENT STORAGE)!" + Reset)
 	fmt.Printf(Green+Bold+"   => Access URL (Web UI)  : http://%s:%d\n"+Reset, targetIP, port)
-	fmt.Printf(Cyan+Bold+"   => Authentication Method: Token\n"+Reset)
+	fmt.Printf(Cyan + Bold + "   => Authentication Method: Token\n" + Reset)
 	fmt.Printf(Cyan+Bold+"   => Active Session Token : %s\n"+Reset, activeToken)
-	fmt.Printf(Cyan+Bold+"   => Persistent Storage   : /var/vault_data (Preserved across runs)\n"+Reset)
+	fmt.Printf(Cyan + Bold + "   => Persistent Storage   : /var/vault_data (Preserved across runs)\n" + Reset)
 	fmt.Println(Green + Bold + "================================================================================" + Reset)
 }
 
@@ -1943,8 +2088,40 @@ func resolveAvailablePort(client *ssh.Client, desiredPort int, serviceName strin
 	return desiredPort
 }
 
+// waitForK3sReady polls until the K3s node reports Ready (or the timeout expires)
+func waitForK3sReady(client *ssh.Client, timeoutSec int) bool {
+	cmd := fmt.Sprintf(`
+		export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+		KC="/usr/local/bin/kubectl"
+		[ -x "$KC" ] || KC="/usr/local/bin/k3s kubectl"
+		for i in $(seq 1 %d); do
+			if $KC get nodes 2>/dev/null | grep -q ' Ready'; then
+				echo K3S_READY
+				exit 0
+			fi
+			sleep 2
+		done
+		echo "---- kubectl get nodes ----"
+		$KC get nodes 2>&1 | tail -n 5
+		echo "---- systemctl status k3s ----"
+		systemctl status k3s --no-pager 2>&1 | head -n 12
+		echo "---- journalctl -u k3s ----"
+		journalctl -u k3s -n 25 --no-pager 2>&1
+		exit 1
+	`, timeoutSec/2)
+	out, _ := runSudoScriptWithSpinnerTimeout(client, cmd, "Waiting for K3s node to become Ready", time.Duration(timeoutSec+30)*time.Second)
+	if strings.Contains(out, "K3S_READY") {
+		return true
+	}
+	fmt.Println(Yellow + Bold + "\n=> K3S DIAGNOSTICS (why the node is not Ready):" + Reset)
+	fmt.Println(out)
+	return false
+}
+
 func deployK3s(client *ssh.Client, targetIP string, versionChannel string) {
-	handleVolumePersistence(client, []string{"/var/lib/rancher/k3s", "/etc/rancher/k3s"}, "K3s Kubernetes Cluster")
+	if _, activeErr := runSudoScript(client, "systemctl is-active --quiet k3s"); activeErr != nil {
+		handleVolumePersistence(client, []string{"/var/lib/rancher/k3s", "/etc/rancher/k3s"}, "K3s Kubernetes Cluster")
+	}
 
 	installEnv := `INSTALL_K3S_EXEC="--write-kubeconfig-mode 644"`
 	if versionChannel != "" && versionChannel != "latest" {
@@ -1987,6 +2164,9 @@ EOF
 	`, versionChannel, installEnv, installEnv)
 
 	_, _ = runSudoScriptWithSpinner(client, cmd, fmt.Sprintf("Bootstrapping K3s Kubernetes Engine (%s)", versionChannel))
+	if !waitForK3sReady(client, 120) {
+		fmt.Println(Yellow + Bold + "=> WARNING: K3s node did not reach Ready state within 120s." + Reset)
+	}
 
 	fmt.Println(Green + Bold + "\n================================================================================" + Reset)
 	fmt.Println(Green + Bold + "==>> K3S KUBERNETES CLUSTER ONLINE!" + Reset)
@@ -1999,10 +2179,15 @@ func deployArgoCD(client *ssh.Client, defaultPort int, targetIP string, manifest
 	fmt.Println(Cyan + Bold + "\n=> Auditing System Port Availability..." + Reset)
 	activePort := resolveAvailablePort(client, defaultPort, "ArgoCD GitOps Server")
 
-	checkK3sCmd := "export KUBECONFIG=/etc/rancher/k3s/k3s.yaml; kubectl get nodes 2>/dev/null | grep -q 'Ready'"
-	if _, err := runSudoScript(client, checkK3sCmd); err != nil {
-		fmt.Println(Cyan + Bold + "=> Bootstrapping K3s Kubernetes Engine..." + Reset)
-		deployK3s(client, targetIP, "v1.28.8+k3s1")
+	if !waitForK3sReady(client, 120) {
+		if _, err := runSudoScript(client, "command -v k3s >/dev/null 2>&1"); err != nil {
+			fmt.Println(Cyan + Bold + "=> Bootstrapping K3s Kubernetes Engine..." + Reset)
+			deployK3s(client, targetIP, "v1.28.8+k3s1")
+		}
+		if !waitForK3sReady(client, 120) {
+			fmt.Println(Red + Bold + "[!] K3s is not Ready. Aborting ArgoCD deployment." + Reset)
+			return
+		}
 	}
 
 	targetTag := "v2.10.4"
@@ -2031,13 +2216,20 @@ func deployArgoCD(client *ssh.Client, defaultPort int, targetIP string, manifest
 		fi
 
 		if [ -s "$MANIFEST_FILE" ] && ! grep -q "Too Many Requests" "$MANIFEST_FILE"; then
-			kubectl apply -n argocd --validate=false -f "$MANIFEST_FILE" >/dev/null 2>&1
+			APPLY_OUT=$(kubectl apply -n argocd --server-side --force-conflicts -f "$MANIFEST_FILE" 2>&1) \
+				&& echo "ARGO_APPLIED" || echo "$APPLY_OUT" | tail -n 8
 			rm -f "$MANIFEST_FILE"
 			exit 0
 		fi
+		echo "ARGO_MANIFEST_DOWNLOAD_FAILED"
 		exit 1
 	`, targetTag, targetTag, targetTag)
-	_, _ = runSudoScriptWithSpinner(client, argoManifestCmd, "Applying ArgoCD Core Resources to Cluster")
+	applyOut, _ := runSudoScriptWithSpinner(client, argoManifestCmd, "Applying ArgoCD Core Resources to Cluster")
+	if !strings.Contains(applyOut, "ARGO_APPLIED") {
+		fmt.Println(Red + Bold + "[!] ArgoCD manifest was NOT applied. Details:" + Reset)
+		fmt.Println(applyOut)
+		return
+	}
 
 	rolloutCmd := `
 		export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
@@ -2075,6 +2267,21 @@ EOF
 	`, activePort)
 	_, _ = runSudoScriptWithSpinner(client, systemdCmd, fmt.Sprintf("Activating Persistent Systemd Listener on Port %d", activePort))
 
+	proxyCheckCmd := fmt.Sprintf(`
+		for i in $(seq 1 30); do
+			if ss -ltn | grep -q ":%d "; then echo PROXY_UP; exit 0; fi
+			sleep 1
+		done
+		journalctl -u argocd-proxy -n 15 --no-pager 2>&1
+		exit 1
+	`, activePort)
+	proxyOut, _ := runSudoScriptWithSpinner(client, proxyCheckCmd, fmt.Sprintf("Verifying ArgoCD Listener on Port %d", activePort))
+	if !strings.Contains(proxyOut, "PROXY_UP") {
+		fmt.Println(Red + Bold + "[!] ArgoCD proxy is NOT listening. Service log:" + Reset)
+		fmt.Println(proxyOut)
+		return
+	}
+
 	passCmd := `
 		export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 		for i in {1..30}; do
@@ -2097,7 +2304,7 @@ EOF
 		}
 	}
 	if activePass == "" {
-		activePass = "admin"
+		activePass = "(not found - run: sudo kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml -n argocd get secret argocd-initial-admin-secret -o jsonpath={.data.password} | base64 -d)"
 	}
 
 	// Interactive Custom Password Modification
@@ -2139,7 +2346,7 @@ EOF
 	fmt.Println(Green + Bold + "==>> ARGOCD GITOPS ENGINE DEPLOYED SUCCESSFULLY!" + Reset)
 	fmt.Printf(Green+Bold+"   => Access URL (HTTPS) : https://%s:%d\n"+Reset, targetIP, activePort)
 	fmt.Printf(Cyan+Bold+"   => Manifest Stream    : %s\n"+Reset, manifestVersion)
-	fmt.Printf(Cyan+Bold+"   => Administrator User : admin\n"+Reset)
+	fmt.Printf(Cyan + Bold + "   => Administrator User : admin\n" + Reset)
 	fmt.Printf(Cyan+Bold+"   => Active Password    : %s\n"+Reset, activePass)
 	fmt.Println(Yellow + Bold + "   => Security Note      : Access via HTTPS (https://...). Accept the self-signed SSL warning." + Reset)
 	fmt.Println(Green + Bold + "================================================================================" + Reset)
@@ -2249,10 +2456,25 @@ case "%s" in
 		systemctl disable docker.socket docker containerd 2>/dev/null || true
 		pkill -9 -f dockerd 2>/dev/null || true
 		pkill -9 -f containerd 2>/dev/null || true
-		apt-get purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker.io 2>/dev/null || \
+
+		apt-get purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker.io docker-compose 2>/dev/null || \
 		yum remove -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin 2>/dev/null || true
+		apt-get autoremove -y -qq 2>/dev/null || true
+
 		rm -f /var/run/docker.sock /run/docker.sock /etc/docker/daemon.json 2>/dev/null
 		rm -rf /etc/docker /var/lib/docker /var/lib/containerd
+
+		# Remove official Docker APT repo + keyring added during install
+		rm -f /etc/apt/sources.list.d/docker.list /etc/apt/keyrings/docker.gpg 2>/dev/null
+
+		# Strip any user's membership from the docker group BEFORE deleting it,
+		# to avoid leaving orphaned numeric GIDs in /etc/group
+		for u in $(getent group docker 2>/dev/null | cut -d: -f4 | tr ',' ' '); do
+			gpasswd -d "$u" docker 2>/dev/null || true
+		done
+		groupdel docker 2>/dev/null || true
+
+		apt-get update -qq 2>/dev/null || true
 		;;
 	trivy)
 		apt-get purge -y trivy 2>/dev/null || dpkg --purge trivy 2>/dev/null || true
