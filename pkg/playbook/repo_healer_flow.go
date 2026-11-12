@@ -165,6 +165,20 @@ func runSelectedRepositoryRepairFlow(
 		audit.Decision,
 		audit.FailureCategory,
 	)
+
+	auditPath := repohealer.RepairAuditPath()
+	if err := repohealer.AppendRepairAuditEvent(auditPath, audit); err != nil {
+		fmt.Fprintf(
+			os.Stderr,
+			Yellow+
+				"WARNING: Repair outcome was completed, but its audit event could not be persisted to %q: %v\n"+
+				Reset,
+			auditPath,
+			err,
+		)
+	} else {
+		fmt.Printf(Cyan+"Audit record written: %s\n"+Reset, auditPath)
+	}
 }
 
 func canProceedToDeb822Inspection(

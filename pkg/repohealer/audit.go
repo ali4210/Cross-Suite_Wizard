@@ -1,9 +1,60 @@
 package repohealer
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
+
+const (
+	repairAuditPathEnv     = "CROSS_SUITE_APT_AUDIT_PATH"
+	defaultRepairAuditPath = "/var/log/cross-suite/repohealer-apt-audit.jsonl"
+)
+
+// RepairAuditPath returns the local path the plain (non-Deb822) APT repair audit trail is
+// appended to, mirroring Deb822RepairAuditPath's env-override convention.
+func RepairAuditPath() string {
+	if path := strings.TrimSpace(os.Getenv(repairAuditPathEnv)); path != "" {
+		return path
+	}
+
+	return defaultRepairAuditPath
+}
+
+// AppendRepairAuditEvent persists a plain APT repair audit event as a JSON line, the same
+// way AppendDeb822RepairAuditEvent does for the Deb822 path.
+func AppendRepairAuditEvent(path string, event RepairAuditEvent) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return errors.New("APT repair audit path is empty")
+	}
+
+	parent := filepath.Dir(path)
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return fmt.Errorf("create APT repair audit directory %q: %w", parent, err)
+	}
+
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+	if err != nil {
+		return fmt.Errorf("open APT repair audit file %q: %w", path, err)
+	}
+	defer file.Close()
+
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("encode APT repair audit event: %w", err)
+	}
+
+	if _, err := file.Write(append(encoded, '\n')); err != nil {
+		return fmt.Errorf("append APT repair audit event to %q: %w", path, err)
+	}
+
+	return nil
+}
 
 type RepairFailureCategory string
 

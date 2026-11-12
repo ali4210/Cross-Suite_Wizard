@@ -4,9 +4,14 @@ import (
 	"bufio"
 	"encoding/base64"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"cross-ssh/pkg/osdetect"
 	"cross-ssh/pkg/repohealer"
@@ -117,10 +122,96 @@ func ShowUniversalHealerMenu(reader *bufio.Reader, client *ssh.Client, targetOS 
 	}
 }
 
+// deepUninstallToolNamePattern restricts deep-uninstall targets to simple identifiers so a
+// crafted or mistyped tool name can never break out of the bash/PowerShell string literal
+// it gets embedded into, or otherwise widen the purge beyond one named application.
+var deepUninstallToolNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{1,63}$`)
+
+// deepUninstallSystemCriticalNames blocks names that alias a top-level system directory.
+// Deleting "/opt/etc" is harmless on its own, but a name from this list is never a real
+// application footprint and is rejected outright rather than resolved against disk.
+var deepUninstallSystemCriticalNames = map[string]bool{
+	"etc": true, "usr": true, "bin": true, "sbin": true, "lib": true, "lib64": true,
+	"var": true, "root": true, "home": true, "boot": true, "sys": true, "proc": true,
+	"dev": true, "tmp": true, "opt": true, "run": true, "mnt": true, "media": true,
+	"srv": true, "windows": true, "system32": true, "programdata": true, "program": true,
+	"system": true, "users": true, "appdata": true, "all": true,
+}
+
+// validateDeepUninstallToolName sanitizes and strictly validates a user-supplied tool name
+// before it is ever embedded into a remote bash or PowerShell script. It rejects empty,
+// very short, path-separator, glob, and shell/PowerShell-metacharacter inputs, path
+// traversal attempts, and system-critical directory names.
+func validateDeepUninstallToolName(tool string) (string, error) {
+	if strings.ContainsAny(tool, "/\\'\"`$;|&<>(){}*?!~#\n\r\t") || strings.Contains(tool, "..") {
+		return "", fmt.Errorf("tool name %q contains characters that are not allowed", tool)
+	}
+
+	cleaned := strings.ToLower(strings.TrimSpace(strings.Split(tool, ".")[0]))
+	if cleaned == "" {
+		return "", fmt.Errorf("tool name is empty")
+	}
+	if !deepUninstallToolNamePattern.MatchString(cleaned) {
+		return "", fmt.Errorf("tool name %q must be 2-64 characters, start with a letter, and contain only letters, numbers, '-' or '_'", cleaned)
+	}
+	if deepUninstallSystemCriticalNames[cleaned] {
+		return "", fmt.Errorf("%q is a system-critical name and cannot be targeted by the deep uninstaller", cleaned)
+	}
+
+	return cleaned, nil
+}
+
+// deepUninstallPreviewPaths lists the concrete paths/patterns a deep uninstall will search
+// and remove for the given tool, shown to the user before any destructive action is taken.
+func deepUninstallPreviewPaths(tool string, targetOS osdetect.TargetOS) []string {
+	if targetOS == osdetect.OSWindows {
+		return []string{
+			fmt.Sprintf(`C:\Program Files\%s, C:\Program Files (x86)\%s, C:\ProgramData\%s`, tool, tool, tool),
+			fmt.Sprintf(`C:\ProgramData\cross-suite\bin\%s.exe, C:\ProgramData\cross-suite\bin\%s`, tool, tool),
+			fmt.Sprintf(`%%LOCALAPPDATA%%\%s, %%APPDATA%%\%s, %%USERPROFILE%%\.%s`, tool, tool, tool),
+			fmt.Sprintf(`HKLM/HKCU Software\%s and related Uninstall/Services registry keys`, tool),
+			fmt.Sprintf("Matching winget/choco packages, services and processes for '%s'", tool),
+			fmt.Sprintf(`System PATH entries and environment variables matching '%s'`, tool),
+		}
+	}
+	return []string{
+		fmt.Sprintf("/usr/bin/%s, /usr/local/bin/%s, /usr/sbin/%s, /usr/local/sbin/%s", tool, tool, tool, tool),
+		fmt.Sprintf("/opt/%s, /var/log/%s, /var/lib/%s, /var/run/%s, /run/%s, /etc/%s", tool, tool, tool, tool, tool, tool),
+		fmt.Sprintf("/etc/apt/keyrings/%s*.gpg, /etc/apt/trusted.gpg.d/%s*.gpg, /etc/apt/sources.list.d/%s*.list", tool, tool, tool),
+		fmt.Sprintf("/etc/yum.repos.d/%s*.repo", tool),
+		fmt.Sprintf("~/.config/%s, ~/.%s, ~/.cache/%s for every user under /home and /root", tool, tool, tool),
+		fmt.Sprintf("Matching apt/dnf/yum/pacman/snap/flatpak packages named '%s' or '%s-*'", tool, tool),
+		fmt.Sprintf("Associated systemd services/sockets, groups, and the '%s' cross-suite footprint registry entry", tool),
+	}
+}
+
 // ExecuteDeepUninstaller purges a tool, its family packages, keyrings, groups, daemons, and state entries
 func ExecuteDeepUninstaller(client *ssh.Client, tool string, targetOS osdetect.TargetOS) {
-	cleanTool := strings.ToLower(strings.TrimSpace(strings.Split(tool, ".")[0]))
-	if cleanTool == "" {
+	cleanTool, err := validateDeepUninstallToolName(tool)
+	if err != nil {
+		fmt.Println(Red + Bold + fmt.Sprintf("\n[!] REJECTED: %s", err) + Reset)
+		return
+	}
+
+	fmt.Println(Red + Bold + fmt.Sprintf("\n[!] DEEP UNINSTALLER TARGET: '%s'", cleanTool) + Reset)
+	fmt.Println(Yellow + "The following will be searched for and removed if present:" + Reset)
+	for _, p := range deepUninstallPreviewPaths(cleanTool, targetOS) {
+		fmt.Println("  - " + p)
+	}
+
+	mode := strings.ToLower(strings.TrimSpace(transfer.ReadRealtimeInput("\nType 'dry' to preview only, 'yes' to execute for real, or anything else to cancel: ")))
+	if mode == "dry" {
+		fmt.Println(Cyan + Bold + "[DRY RUN] No changes were made. Re-run and type 'yes' to execute for real." + Reset)
+		return
+	}
+	if mode != "yes" {
+		fmt.Println(Yellow + "Deep uninstall cancelled." + Reset)
+		return
+	}
+
+	confirm := strings.ToLower(strings.TrimSpace(transfer.ReadRealtimeInput(fmt.Sprintf("Confirm by re-typing the tool name (%s) to proceed: ", cleanTool))))
+	if confirm != cleanTool {
+		fmt.Println(Yellow + "Confirmation did not match. Deep uninstall cancelled." + Reset)
 		return
 	}
 
@@ -3040,63 +3131,252 @@ func injectManualCustomRepoWithDynamicExample(client *ssh.Client, targetOS osdet
 	InjectCustomRepoIndexed(client, repoURL, targetOS)
 }
 
-// InjectCustomRepoIndexed writes uniquely named custom repos with smart .repo vs baseurl detection
+// validateCustomRepoURL rejects empty, malformed, or shell-metacharacter-bearing repository
+// URLs before they are ever embedded into a remote script, and requires a real http(s)/ftp
+// URL with a host.
+func validateCustomRepoURL(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", fmt.Errorf("URL is empty")
+	}
+	if strings.ContainsAny(trimmed, "`'\"$;|&<>(){}\n\r\t\\") {
+		return "", fmt.Errorf("URL %q contains characters that are not allowed", trimmed)
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return "", fmt.Errorf("%q is not a valid URL: %w", trimmed, err)
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "http", "https", "ftp":
+	default:
+		return "", fmt.Errorf("URL %q must use http, https, or ftp", trimmed)
+	}
+	if parsed.Host == "" {
+		return "", fmt.Errorf("URL %q is missing a host", trimmed)
+	}
+	return trimmed, nil
+}
+
+// resolveNextCustomRepoFilePath determines the exact repo-definition file an injection would
+// create, without writing anything, so it can be snapshotted before any change is made.
+func resolveNextCustomRepoFilePath(exec repohealer.Executor) (repoFile string, isAPT bool, err error) {
+	const script = `
+if [ -d /etc/yum.repos.d ]; then
+	idx=$(find /etc/yum.repos.d/ -maxdepth 1 -type f -name "custom-*.repo" 2>/dev/null | wc -l | tr -d ' ')
+	echo "RPM|/etc/yum.repos.d/custom-$((idx+1)).repo"
+elif [ -d /etc/apt/sources.list.d ]; then
+	idx=$(find /etc/apt/sources.list.d/ -maxdepth 1 -type f -name "custom-*.list" 2>/dev/null | wc -l | tr -d ' ')
+	echo "APT|/etc/apt/sources.list.d/custom-$((idx+1)).list"
+else
+	echo "UNKNOWN|"
+fi
+`
+	out, runErr := exec.RunSudo(script)
+	if runErr != nil {
+		return "", false, runErr
+	}
+	parts := strings.SplitN(strings.TrimSpace(out), "|", 2)
+	if len(parts) != 2 || parts[1] == "" {
+		return "", false, fmt.Errorf("no supported repository directory (/etc/apt/sources.list.d or /etc/yum.repos.d) was found")
+	}
+	return parts[1], parts[0] == "APT", nil
+}
+
+// recordCustomRepoAudit appends a custom-repo-injection event to the same local audit trail
+// plain APT repairs use (repohealer.RepairAuditPath), so every change Hub 5 makes is traceable.
+func recordCustomRepoAudit(repoURL, keyURL, snapshotID, snapshotPath string, applied bool, failure repohealer.RepairFailureCategory) {
+	decision := repohealer.ApprovalExecutionExecuted
+	if !applied {
+		decision = repohealer.ApprovalExecutionDeclined
+	}
+	audit := repohealer.RepairAuditEvent{
+		Event:           "custom_repo_injection",
+		OccurredAt:      time.Now().UTC(),
+		Decision:        decision,
+		ProfileID:       keyURL,
+		RepositoryURL:   repoURL,
+		RepairAttempted: true,
+		Applied:         applied,
+		SnapshotID:      snapshotID,
+		SnapshotPath:    snapshotPath,
+		FailureCategory: failure,
+	}
+	auditPath := repohealer.RepairAuditPath()
+	if err := repohealer.AppendRepairAuditEvent(auditPath, audit); err != nil {
+		fmt.Println(Yellow + fmt.Sprintf("WARNING: custom repo audit event could not be persisted to %q: %v", auditPath, err) + Reset)
+	} else {
+		fmt.Println(Cyan + fmt.Sprintf("Audit record written: %s", auditPath) + Reset)
+	}
+}
+
+// InjectCustomRepoIndexed writes uniquely named custom repos with smart .repo vs baseurl
+// detection. The repo URL and optional GPG key URL are strictly validated, the target file
+// (and keyring, if a key is supplied) is snapshotted before any write via the same mechanism
+// Option [7]/[9] use (so Option [9] Rollback can undo this), and the outcome is audited.
 func InjectCustomRepoIndexed(client *ssh.Client, repoURL string, targetOS osdetect.TargetOS) {
-	if targetOS == osdetect.OSWindows {
-		winCmd := fmt.Sprintf("powershell -NoProfile -Command \"Register-PSRepository -Name 'CustomCross-%d' -SourceLocation '%s' -InstallationPolicy Trusted 2>$null\"", os.Getpid(), repoURL)
-		_, _ = executeRemoteCommand(client, winCmd)
-		fmt.Println(Green + Bold + "[SUCCESS] Windows PowerShell Repository Injected!" + Reset)
+	validatedURL, err := validateCustomRepoURL(repoURL)
+	if err != nil {
+		fmt.Println(Red + Bold + fmt.Sprintf("[!] REJECTED: %s", err) + Reset)
 		return
 	}
 
+	keyInput := strings.TrimSpace(transfer.ReadRealtimeInput("Optional: GPG signing key URL for this repo (recommended; press Enter to inject UNSIGNED/trusted): "))
+	var keyURL string
+	if keyInput != "" {
+		keyURL, err = validateCustomRepoURL(keyInput)
+		if err != nil {
+			fmt.Println(Red + Bold + fmt.Sprintf("[!] REJECTED key URL: %s", err) + Reset)
+			return
+		}
+	}
+
+	if targetOS == osdetect.OSWindows {
+		winCmd := fmt.Sprintf("powershell -NoProfile -Command \"Register-PSRepository -Name 'CustomCross-%d' -SourceLocation '%s' -InstallationPolicy Trusted 2>$null\"", os.Getpid(), validatedURL)
+		_, _ = executeRemoteCommand(client, winCmd)
+		fmt.Println(Green + Bold + "[SUCCESS] Windows PowerShell Repository Injected!" + Reset)
+		fmt.Println(Yellow + "[!] Note: a registered PSRepository is not file-based, so there is no snapshot to roll back — remove it manually with Unregister-PSRepository if needed." + Reset)
+		recordCustomRepoAudit(validatedURL, keyURL, "", "", true, repohealer.RepairFailureNone)
+		return
+	}
+
+	if keyURL == "" {
+		fmt.Println(Yellow + Bold + "[!] WARNING: No GPG key supplied — this repository will be injected UNSIGNED/trusted, bypassing package signature verification." + Reset)
+	}
+
 	ensureAutonomousPermissionsWithPrompt(client)
-	cleanURL := strings.TrimSpace(repoURL)
+	exec := repoHealerExecutor{client: client}
 
-	script := fmt.Sprintf(`#!/bin/bash
-URL="%s"
+	lowerURL := strings.ToLower(validatedURL)
+	if strings.HasSuffix(lowerURL, ".rpm") {
+		fmt.Println(Yellow + "[!] This URL is a release package (.rpm) that registers its own repo and key — there is no single file to snapshot, so Option [9] Rollback will not apply to this change." + Reset)
+		script := fmt.Sprintf(`#!/bin/bash
+set -u
+if rpm -Uvh --quiet %s 2>/dev/null || dnf install -y %s 2>/dev/null || yum install -y %s 2>/dev/null; then
+	echo "CUSTOM_REPO_OK"
+else
+	echo "CUSTOM_REPO_ERROR|release_rpm_install_failed"
+fi
+`, strconv.Quote(validatedURL), strconv.Quote(validatedURL), strconv.Quote(validatedURL))
+		out, runErr := runSudoScriptWithSpinner(client, script, "Installing Release Repository Package")
+		if runErr != nil || !strings.Contains(out, "CUSTOM_REPO_OK") {
+			fmt.Println(Red + Bold + "[!] Release package installation failed:" + Reset)
+			if strings.TrimSpace(out) != "" {
+				fmt.Println(Yellow + out + Reset)
+			}
+			recordCustomRepoAudit(validatedURL, keyURL, "", "", false, repohealer.RepairFailureExecution)
+			return
+		}
+		fmt.Println(Green + Bold + "[SUCCESS] Release repository package installed & active!" + Reset)
+		recordCustomRepoAudit(validatedURL, keyURL, "", "", true, repohealer.RepairFailureNone)
+		return
+	}
 
-if [ -d /etc/yum.repos.d ]; then
-	if [[ "$URL" == *".repo" ]]; then
-		echo "=> Pulling remote .repo file directly into /etc/yum.repos.d/..."
-		curl -sSL "$URL" -o /etc/yum.repos.d/$(basename "$URL") 2>/dev/null || yum-config-manager --add-repo "$URL" 2>/dev/null || true
-	else
-		idx=$(find /etc/yum.repos.d/ -type f -name "custom-*.repo" 2>/dev/null | wc -l | awk '{print $1}')
-		next_idx=$((idx + 1))
-		repo_file="/etc/yum.repos.d/custom-${next_idx}.repo"
+	repoFile, isAPT, pathErr := resolveNextCustomRepoFilePath(exec)
+	if pathErr != nil {
+		fmt.Println(Red + Bold + fmt.Sprintf("[!] Could not determine target repo file: %v", pathErr) + Reset)
+		recordCustomRepoAudit(validatedURL, keyURL, "", "", false, repohealer.RepairFailureUnknown)
+		return
+	}
 
-		cat << EOF > "$repo_file"
-[custom-cross-repo-${next_idx}]
-name=Cross-Suite Private Repository ${next_idx}
-baseurl=${URL}
+	keyringFile := ""
+	if isAPT && keyURL != "" {
+		keyringFile = strings.TrimSuffix(strings.Replace(repoFile, "/sources.list.d/", "/keyrings/", 1), ".list") + ".gpg"
+	}
+
+	snapTargets := []string{repoFile}
+	if keyringFile != "" {
+		snapTargets = append(snapTargets, keyringFile)
+	}
+
+	snapshot, snapErr := repohealer.CreateAPTFileSnapshot(exec, snapTargets)
+	if snapErr != nil || !snapshot.Created {
+		fmt.Println(Red + Bold + fmt.Sprintf("[!] Could not create a pre-change snapshot — aborting for safety: %v", snapErr) + Reset)
+		recordCustomRepoAudit(validatedURL, keyURL, "", "", false, repohealer.RepairFailureSnapshot)
+		return
+	}
+	fmt.Println(Cyan + fmt.Sprintf("[+] Pre-change snapshot created: %s (rollback via Option [9])", snapshot.ID) + Reset)
+
+	var script string
+	if isAPT {
+		signedBy := "[trusted=yes]"
+		keyFetch := ""
+		if keyringFile != "" {
+			signedBy = fmt.Sprintf("[signed-by=%s]", keyringFile)
+			keyFetch = fmt.Sprintf(`
+mkdir -p "$(dirname %s)"
+if curl -fsSL %s | gpg --dearmor -o %s 2>/dev/null; then
+	chmod 0644 %s
+else
+	echo "CUSTOM_REPO_ERROR|key_fetch_failed"
+	exit 1
+fi
+`, strconv.Quote(keyringFile), strconv.Quote(keyURL), strconv.Quote(keyringFile), strconv.Quote(keyringFile))
+		}
+		script = fmt.Sprintf(`#!/bin/bash
+set -u
+%s
+cat << 'REPO_EOF' > %s
+deb %s %s ./
+REPO_EOF
+chmod 644 %s
+apt-get update -qq 2>/dev/null || true
+echo "CUSTOM_REPO_OK"
+`, keyFetch, strconv.Quote(repoFile), signedBy, validatedURL, strconv.Quote(repoFile))
+	} else if strings.HasSuffix(lowerURL, ".repo") {
+		// The URL already points at a ready-made .repo definition file — fetch it verbatim
+		// rather than wrapping it in a synthesized baseurl stanza.
+		script = fmt.Sprintf(`#!/bin/bash
+set -u
+if curl -fsSL %s -o %s; then
+	chmod 644 %s
+	(dnf clean all 2>/dev/null || yum clean all 2>/dev/null || true)
+	echo "CUSTOM_REPO_OK"
+else
+	echo "CUSTOM_REPO_ERROR|fetch_failed"
+fi
+`, strconv.Quote(validatedURL), strconv.Quote(repoFile), strconv.Quote(repoFile))
+	} else {
+		gpgCheck := "gpgcheck=0"
+		gpgKeyLine := ""
+		if keyURL != "" {
+			gpgCheck = "gpgcheck=1"
+			gpgKeyLine = "gpgkey=" + keyURL
+		}
+		script = fmt.Sprintf(`#!/bin/bash
+set -u
+cat << 'REPO_EOF' > %s
+[custom-cross-repo]
+name=Cross-Suite Private Repository
+baseurl=%s
 enabled=1
-gpgcheck=0
+%s
+%s
 priority=1
 skip_if_unavailable=1
-EOF
-		chmod 644 "$repo_file"
-	fi
-	yum clean all --setopt=*.skip_if_unavailable=true 2>/dev/null || dnf clean all 2>/dev/null || true
+REPO_EOF
+chmod 644 %s
+(dnf clean all 2>/dev/null || yum clean all 2>/dev/null || true)
+echo "CUSTOM_REPO_OK"
+`, strconv.Quote(repoFile), validatedURL, gpgCheck, gpgKeyLine, strconv.Quote(repoFile))
+	}
 
-elif [ -d /etc/apt/sources.list.d ]; then
-	idx=$(find /etc/apt/sources.list.d/ -type f -name "custom-*.list" 2>/dev/null | wc -l | awk '{print $1}')
-	next_idx=$((idx + 1))
-	repo_file="/etc/apt/sources.list.d/custom-${next_idx}.list"
+	out, runErr := runSudoScriptWithSpinner(client, script, "Injecting Custom Repository Endpoint")
 
-	cat << EOF > "$repo_file"
-deb [trusted=yes] %s ./
-EOF
-	chmod 644 "$repo_file"
-	apt-get update -qq 2>/dev/null || true
-fi
-exit 0
-`, cleanURL, cleanURL)
-
-	writeCmd := fmt.Sprintf("cat << 'CROSS_REPO_INJECT_EOF' > /var/tmp/cross_repo_inject.sh\n%s\nCROSS_REPO_INJECT_EOF\nchmod +x /var/tmp/cross_repo_inject.sh", script)
-	_, _ = executeRemoteCommand(client, writeCmd)
-	_, _ = runSudoScriptWithSpinner(client, "bash /var/tmp/cross_repo_inject.sh", "Injecting Custom Repository Endpoint")
-	_, _ = executeRemoteCommand(client, "rm -f /var/tmp/cross_repo_inject.sh")
+	if runErr != nil || !strings.Contains(out, "CUSTOM_REPO_OK") {
+		fmt.Println(Red + Bold + "[!] Custom repository injection failed:" + Reset)
+		if strings.TrimSpace(out) != "" {
+			fmt.Println(Yellow + out + Reset)
+		}
+		fmt.Println(Yellow + fmt.Sprintf("Rolling back any partial change from snapshot %s...", snapshot.ID) + Reset)
+		if rbErr := repohealer.RestoreAPTFileSnapshot(exec, snapshot, snapTargets); rbErr != nil {
+			fmt.Println(Red + Bold + fmt.Sprintf("[!] Automatic rollback also failed: %v — restore manually via Option [9].", rbErr) + Reset)
+		}
+		recordCustomRepoAudit(validatedURL, keyURL, snapshot.ID, snapshot.Path, false, repohealer.RepairFailureExecution)
+		return
+	}
 
 	fmt.Println(Green + Bold + "[SUCCESS] Custom Repository Endpoint Injected & Active!" + Reset)
+	recordCustomRepoAudit(validatedURL, keyURL, snapshot.ID, snapshot.Path, true, repohealer.RepairFailureNone)
 }
 
 // InjectCustomRepo writes a standard custom repo endpoint
@@ -3201,7 +3481,7 @@ func RollbackSystemState(client *ssh.Client, targetOS osdetect.TargetOS) {
 		checkCmd := "powershell -NoProfile -Command \"Test-Path 'C:\\ProgramData\\cross-suite\\snapshots\\machine-path.snapshot.txt'\""
 		checkOut, _ := executeRemoteCommand(client, checkCmd)
 		if !strings.Contains(checkOut, "True") {
-			fmt.Println(Yellow + Bold + "[!] No pre-repair snapshot found. Run Option [7] Self-Healer at least once first to create one." + Reset)
+			fmt.Println(Yellow + Bold + "[!] No pre-repair snapshot found on this Windows host. Windows package-manager repair (winget/Chocolatey/Scoop) does not yet write a snapshot before making changes, so there is nothing to roll back to." + Reset)
 			return
 		}
 
@@ -3247,22 +3527,148 @@ Write-Output "NOTE: winget-list.snapshot.txt and choco-list.snapshot.txt are ava
 		return
 	}
 
-	ensureAutonomousPermissionsWithPrompt(client)
-	rollbackCmd := `
-		if [ -d /var/lib/cross-suite/snapshots ] && [ -n "$(ls -A /var/lib/cross-suite/snapshots 2>/dev/null)" ]; then
-			cp -rf /var/lib/cross-suite/snapshots/sources.list* /etc/apt/ 2>/dev/null || true
-			cp -rf /var/lib/cross-suite/snapshots/yum.repos.d* /etc/ 2>/dev/null || true
-			apt-get update -qq 2>/dev/null || yum clean all 2>/dev/null || true
-			echo "SNAPSHOT_RESTORED"
-		else
-			echo "NO_SNAPSHOT_FOUND"
-		fi
-	`
-	out, _ := runSudoScriptWithSpinner(client, rollbackCmd, "Restoring Pre-Repair Snapshot State")
-
-	if strings.Contains(out, "NO_SNAPSHOT_FOUND") {
-		fmt.Println(Yellow + Bold + "[!] No pre-repair snapshot found. Run Option [7] Self-Healer at least once first to create one." + Reset)
+	if targetOS == osdetect.OSMacOS {
+		fmt.Println(Yellow + Bold + "[!] No snapshot/rollback mechanism exists for macOS yet — the self-healer does not snapshot Homebrew state. This will be added when macOS repair adapters are built." + Reset)
 		return
 	}
-	fmt.Println(Green + Bold + "[SUCCESS] System rollback completed successfully — repository config restored from snapshot!" + Reset)
+
+	ensureAutonomousPermissionsWithPrompt(client)
+	exec := repoHealerExecutor{client: client}
+
+	snapshots, err := listRepoHealerSnapshots(exec)
+	if err != nil {
+		fmt.Println(Red + Bold + fmt.Sprintf("[!] Could not list snapshots: %v", err) + Reset)
+		return
+	}
+	if len(snapshots) == 0 {
+		fmt.Println(Yellow + Bold + "[!] No pre-repair snapshot found. Run Option [7] Self-Healer (repair mode) at least once first to create one." + Reset)
+		return
+	}
+
+	fmt.Println(Yellow + "\nAvailable snapshots (most recent first):" + Reset)
+	for i, s := range snapshots {
+		fmt.Printf("  [%d] %s  (created %s, scope: %s)\n", i+1, s.ID, s.CreatedAt, s.Scope)
+	}
+
+	choice := strings.TrimSpace(transfer.ReadRealtimeInput(fmt.Sprintf("\nSelect a snapshot to restore [1-%d] or '0' to cancel: ", len(snapshots))))
+	idx, convErr := strconv.Atoi(choice)
+	if convErr != nil || idx < 1 || idx > len(snapshots) {
+		fmt.Println(Yellow + "Rollback cancelled." + Reset)
+		return
+	}
+	selected := snapshots[idx-1]
+
+	files, err := listRepoHealerSnapshotFiles(exec, selected.ID)
+	if err != nil {
+		fmt.Println(Red + Bold + fmt.Sprintf("[!] Could not read snapshot %s: %v", selected.ID, err) + Reset)
+		return
+	}
+	if len(files) == 0 {
+		fmt.Println(Yellow + Bold + fmt.Sprintf("[!] Snapshot %s has no recorded files to restore.", selected.ID) + Reset)
+		return
+	}
+
+	fmt.Println(Yellow + fmt.Sprintf("\nRestoring snapshot %s will overwrite/remove these files:", selected.ID) + Reset)
+	for _, f := range files {
+		fmt.Println("  - " + f)
+	}
+
+	confirm := strings.ToLower(strings.TrimSpace(transfer.ReadRealtimeInput("Type 'yes' to restore this snapshot, or anything else to cancel: ")))
+	if confirm != "yes" {
+		fmt.Println(Yellow + "Rollback cancelled." + Reset)
+		return
+	}
+
+	snapshot := repohealer.Snapshot{
+		ID:      selected.ID,
+		Path:    "/var/lib/cross-suite/snapshots/" + selected.ID,
+		Created: true,
+	}
+
+	if restoreErr := repohealer.RestoreAPTFileSnapshot(exec, snapshot, files); restoreErr != nil {
+		fmt.Println(Red + Bold + fmt.Sprintf("[!] Rollback failed: %v", restoreErr) + Reset)
+		return
+	}
+	fmt.Println(Green + Bold + fmt.Sprintf("[SUCCESS] Restored snapshot %s and re-ran apt-get update to verify the repository state.", selected.ID) + Reset)
+}
+
+// repoHealerSnapshotInfo is a listing-friendly summary of a snapshot directory written by
+// repohealer.CreateAPTFileSnapshot, read back from its manifest.txt.
+type repoHealerSnapshotInfo struct {
+	ID        string
+	CreatedAt string
+	Scope     string
+}
+
+// repoHealerSnapshotIDPattern mirrors repohealer's own snapshot ID format (validateAPTFileSnapshotID)
+// so a snapshot ID is never embedded into a follow-up remote script unless it matches exactly.
+var repoHealerSnapshotIDPattern = regexp.MustCompile(`^apt-[0-9TZ]+-[0-9a-f]+$`)
+
+// listRepoHealerSnapshots enumerates every snapshot directory under the real root written by
+// repohealer.CreateAPTFileSnapshot (/var/lib/cross-suite/snapshots/<id>/manifest.txt), newest first.
+func listRepoHealerSnapshots(exec repohealer.Executor) ([]repoHealerSnapshotInfo, error) {
+	const script = `
+set -eu
+ROOT=/var/lib/cross-suite/snapshots
+[ -d "$ROOT" ] || exit 0
+for d in "$ROOT"/*/; do
+	[ -d "$d" ] || continue
+	id="$(basename "$d")"
+	[ -f "$d/manifest.txt" ] || continue
+	created="$(sed -n 's/^created_at=//p' "$d/manifest.txt" | head -n1)"
+	scope="$(sed -n 's/^scope=//p' "$d/manifest.txt" | head -n1)"
+	printf 'SNAPSHOT|%s|%s|%s\n' "$id" "$created" "$scope"
+done
+`
+	out, err := exec.RunSudo(script)
+	if err != nil {
+		return nil, err
+	}
+
+	var snaps []repoHealerSnapshotInfo
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "SNAPSHOT|") {
+			continue
+		}
+		parts := strings.SplitN(line, "|", 4)
+		if len(parts) < 4 || !repoHealerSnapshotIDPattern.MatchString(parts[1]) {
+			continue
+		}
+		snaps = append(snaps, repoHealerSnapshotInfo{ID: parts[1], CreatedAt: parts[2], Scope: parts[3]})
+	}
+	sort.Slice(snaps, func(i, j int) bool { return snaps[i].ID > snaps[j].ID })
+	return snaps, nil
+}
+
+// listRepoHealerSnapshotFiles derives the original absolute target paths recorded inside a
+// snapshot by listing its files/**/*.meta entries, matching the layout createAPTFileSnapshotAtRoot
+// writes (files/<relative-path>.meta + .content).
+func listRepoHealerSnapshotFiles(exec repohealer.Executor, snapshotID string) ([]string, error) {
+	if !repoHealerSnapshotIDPattern.MatchString(snapshotID) {
+		return nil, fmt.Errorf("invalid snapshot id %q", snapshotID)
+	}
+
+	script := "set -eu\n" +
+		"SNAPSHOT_DIR=/var/lib/cross-suite/snapshots/" + snapshotID + "\n" +
+		`[ -d "$SNAPSHOT_DIR/files" ] || exit 0
+find "$SNAPSHOT_DIR/files" -name '*.meta' -print | while read -r m; do
+	rel="${m#$SNAPSHOT_DIR/files/}"
+	rel="${rel%.meta}"
+	printf 'FILE|/%s\n' "$rel"
+done
+`
+	out, err := exec.RunSudo(script)
+	if err != nil {
+		return nil, err
+	}
+
+	var files []string
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "FILE|") {
+			files = append(files, strings.TrimPrefix(line, "FILE|"))
+		}
+	}
+	return files, nil
 }

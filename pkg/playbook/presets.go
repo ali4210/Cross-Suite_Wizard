@@ -259,16 +259,18 @@ func sanitizeCommandForWindows(rawBashCmd string) string {
 	return "export MSYS_NO_PATHCONV=1 2>/dev/null || true; export PATH=\"$PATH:/usr/local/bin:/usr/local/sbin:/usr/sbin:/sbin:/usr/bin:/bin\"; " + clean
 }
 
-// runSudoScript executes commands securely using echo password | sudo -S -E bash -c "..."
+// runSudoScript executes commands securely via sudo -S -E bash -c "...", with the
+// cached password (if any) delivered over the SSH session's stdin rather than
+// embedded in the command string, so a password containing a quote or other shell
+// metacharacter can never break out of the command it's meant to unlock.
 func runSudoScript(client *ssh.Client, rawBashCmd string) (string, error) {
 	sanitizedCmd := sanitizeCommandForWindows(rawBashCmd)
 	cleanCmd := strings.ReplaceAll(sanitizedCmd, "'", "'\"'\"'")
-	var finalCmd string
 	if cachedSudoPassword != "" {
-		finalCmd = fmt.Sprintf("echo '%s' | sudo -S -E bash -c '%s'", cachedSudoPassword, cleanCmd)
-	} else {
-		finalCmd = fmt.Sprintf("sudo -E bash -c '%s'", cleanCmd)
+		finalCmd := fmt.Sprintf("sudo -S -E bash -c '%s'", cleanCmd)
+		return executeRemoteCommandWithStdinTimeout(client, finalCmd, cachedSudoPassword+"\n", defaultCommandTimeout)
 	}
+	finalCmd := fmt.Sprintf("sudo -E bash -c '%s'", cleanCmd)
 	return executeRemoteCommand(client, finalCmd)
 }
 
@@ -278,16 +280,16 @@ func runSudoScriptWithSpinner(client *ssh.Client, rawBashCmd string, label strin
 }
 
 // runSudoScriptWithSpinnerTimeout is for heavy operations that need more than 5 minutes
-// (large image pulls, GitLab/Wazuh bootstrapping, ELK deployment).
+// (large image pulls, GitLab/Wazuh bootstrapping, ELK deployment). The cached password,
+// when present, is delivered over stdin rather than interpolated into the command.
 func runSudoScriptWithSpinnerTimeout(client *ssh.Client, rawBashCmd string, label string, timeout time.Duration) (string, error) {
 	sanitizedCmd := sanitizeCommandForWindows(rawBashCmd)
 	cleanCmd := strings.ReplaceAll(sanitizedCmd, "'", "'\"'\"'")
-	var finalCmd string
 	if cachedSudoPassword != "" {
-		finalCmd = fmt.Sprintf("echo '%s' | sudo -S -E bash -c '%s'", cachedSudoPassword, cleanCmd)
-	} else {
-		finalCmd = fmt.Sprintf("sudo -E bash -c '%s'", cleanCmd)
+		finalCmd := fmt.Sprintf("sudo -S -E bash -c '%s'", cleanCmd)
+		return executeRemoteCommandWithStdinSpinnerTimeout(client, finalCmd, cachedSudoPassword+"\n", label, timeout)
 	}
+	finalCmd := fmt.Sprintf("sudo -E bash -c '%s'", cleanCmd)
 	return executeRemoteCommandWithSpinnerTimeout(client, finalCmd, label, timeout)
 }
 
@@ -427,13 +429,13 @@ func ensureAutonomousPermissionsWithPrompt(client *ssh.Client) {
 	}
 
 	if strings.TrimSpace(cachedSudoPassword) != "" {
-		setupCmd := `
-			echo '` + cachedSudoPassword + `' | sudo -S tee /etc/sudoers.d/cross-suite >/dev/null 2>&1
-			echo '` + cachedSudoPassword + `' | sudo -S chmod 0440 /etc/sudoers.d/cross-suite >/dev/null 2>&1
-			echo '` + cachedSudoPassword + `' | sudo -S chmod 666 /var/run/docker.sock >/dev/null 2>&1
-			echo '` + cachedSudoPassword + `' | sudo -S sysctl -w vm.max_map_count=262144 >/dev/null 2>&1
+		setupScript := `
+			tee /etc/sudoers.d/cross-suite >/dev/null 2>&1
+			chmod 0440 /etc/sudoers.d/cross-suite >/dev/null 2>&1
+			chmod 666 /var/run/docker.sock >/dev/null 2>&1
+			sysctl -w vm.max_map_count=262144 >/dev/null 2>&1
 		`
-		_, _ = executeRemoteCommandWithSpinner(client, setupCmd, "Configuring Autonomous Administrative Rights")
+		_, _ = runSudoScriptWithSpinner(client, setupScript, "Configuring Autonomous Administrative Rights")
 		fmt.Println(Green + Bold + "=> Administrative elevation validated successfully for this session!" + Reset)
 	}
 }
