@@ -143,6 +143,17 @@ func runSelectedAPTListRepairExecutionFlow(
 		}
 		fmt.Println("\n" + repohealer.FormatHashiCorpAPTListRepairApprovalResult(execution))
 		appendHashiCorpAPTListRepairAudit(auditPath, execution)
+		recordSnapshotHistory(
+			client,
+			"Option 7 mode [2]",
+			execution.ActionID,
+			"",
+			"",
+			[]string{execution.SourceFile, execution.KeyringPath},
+			repohealer.ManagerAPT,
+			"",
+			repohealer.SnapshotHistoryResultBlocked,
+		)
 		return
 	}
 
@@ -166,6 +177,38 @@ func runSelectedAPTListRepairExecutionFlow(
 	execution := repohealer.ApproveAndApplyHashiCorpAPTListRepair(exec, preflight, confirmation)
 	fmt.Println("\n" + repohealer.FormatHashiCorpAPTListRepairApprovalResult(execution))
 	appendHashiCorpAPTListRepairAudit(auditPath, execution)
+	recordSnapshotHistory(
+		client,
+		"Option 7 mode [2]",
+		execution.ActionID,
+		execution.ApplyResult.Snapshot.ID,
+		execution.ApplyResult.Snapshot.Path,
+		[]string{execution.SourceFile, execution.KeyringPath},
+		repohealer.ManagerAPT,
+		"",
+		snapshotHistoryResultForHashiCorpAPTList(execution.Status, execution.ApplyResult.RolledBack),
+	)
+}
+
+// snapshotHistoryResultForHashiCorpAPTList maps the HashiCorp APT-list repair's own approval
+// status onto Option 9's shared history result vocabulary.
+func snapshotHistoryResultForHashiCorpAPTList(
+	status repohealer.HashiCorpAPTListRepairApprovalStatus,
+	rolledBack bool,
+) string {
+	switch status {
+	case repohealer.HashiCorpAPTListRepairApprovalStatusApplied:
+		return repohealer.SnapshotHistoryResultApplied
+	case repohealer.HashiCorpAPTListRepairApprovalStatusDeclined:
+		return repohealer.SnapshotHistoryResultDeclined
+	case repohealer.HashiCorpAPTListRepairApprovalStatusBlocked:
+		return repohealer.SnapshotHistoryResultBlocked
+	default:
+		if rolledBack {
+			return repohealer.SnapshotHistoryResultRolledBack
+		}
+		return repohealer.SnapshotHistoryResultFailed
+	}
 }
 
 func appendHashiCorpAPTListRepairAudit(

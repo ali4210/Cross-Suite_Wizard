@@ -184,6 +184,39 @@ func runSelectedRepositoryRepairFlow(
 	} else {
 		fmt.Printf(Cyan+"Audit record written: %s\n"+Reset, auditPath)
 	}
+
+	recordSnapshotHistory(
+		client,
+		"Option 7 mode [2]",
+		execution.Action.ID,
+		execution.RepairResult.Snapshot.ID,
+		execution.RepairResult.Snapshot.Path,
+		[]string{execution.Action.SourceFile, execution.Action.KeyringPath},
+		result.Target.PackageManager,
+		"",
+		snapshotHistoryResultForApprovalExecution(execution),
+	)
+}
+
+// snapshotHistoryResultForApprovalExecution maps the generic known-vendor APT repair's own
+// decision/applied/rolled-back state onto Option 9's shared history result vocabulary.
+func snapshotHistoryResultForApprovalExecution(execution repohealer.ApprovalExecutionResult) string {
+	switch execution.Decision {
+	case repohealer.ApprovalExecutionBlocked, repohealer.ApprovalExecutionActionNotFound:
+		return repohealer.SnapshotHistoryResultBlocked
+	case repohealer.ApprovalExecutionDeclined:
+		return repohealer.SnapshotHistoryResultDeclined
+	case repohealer.ApprovalExecutionExecuted:
+		if execution.RepairResult.Applied {
+			return repohealer.SnapshotHistoryResultApplied
+		}
+		if execution.RepairResult.RolledBack {
+			return repohealer.SnapshotHistoryResultRolledBack
+		}
+		return repohealer.SnapshotHistoryResultFailed
+	default:
+		return repohealer.SnapshotHistoryResultFailed
+	}
 }
 
 func canProceedToDeb822Inspection(
@@ -344,6 +377,17 @@ func runSelectedDeb822RepairExecutionFlow(
 				audit.FailureCategory,
 			)
 		}
+		recordSnapshotHistory(
+			client,
+			"Option 7 mode [2]",
+			execution.ActionID,
+			"",
+			"",
+			[]string{execution.SourceFile, execution.KeyringPath},
+			repohealer.ManagerAPT,
+			"",
+			repohealer.SnapshotHistoryResultBlocked,
+		)
 		return
 	}
 
@@ -392,6 +436,36 @@ func runSelectedDeb822RepairExecutionFlow(
 			audit.Status,
 			audit.FailureCategory,
 		)
+	}
+
+	recordSnapshotHistory(
+		client,
+		"Option 7 mode [2]",
+		execution.ActionID,
+		execution.ApplyResult.Snapshot.ID,
+		execution.ApplyResult.Snapshot.Path,
+		[]string{execution.SourceFile, execution.KeyringPath},
+		repohealer.ManagerAPT,
+		"",
+		snapshotHistoryResultForDeb822(execution.Status, execution.ApplyResult.RolledBack),
+	)
+}
+
+// snapshotHistoryResultForDeb822 maps the Deb822 repair's own approval status onto Option 9's
+// shared history result vocabulary.
+func snapshotHistoryResultForDeb822(status repohealer.Deb822RepairApprovalStatus, rolledBack bool) string {
+	switch status {
+	case repohealer.Deb822RepairApprovalStatusApplied:
+		return repohealer.SnapshotHistoryResultApplied
+	case repohealer.Deb822RepairApprovalStatusDeclined:
+		return repohealer.SnapshotHistoryResultDeclined
+	case repohealer.Deb822RepairApprovalStatusBlocked:
+		return repohealer.SnapshotHistoryResultBlocked
+	default:
+		if rolledBack {
+			return repohealer.SnapshotHistoryResultRolledBack
+		}
+		return repohealer.SnapshotHistoryResultFailed
 	}
 }
 

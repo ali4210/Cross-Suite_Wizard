@@ -8,6 +8,8 @@ import (
 
 	"cross-ssh/pkg/repohealer"
 	"cross-ssh/pkg/transfer"
+
+	"golang.org/x/crypto/ssh"
 )
 
 // runAPTFixBrokenRepairFlow is Option 7 mode [5]: a read-only preview of "apt --fix-broken
@@ -15,7 +17,7 @@ import (
 // a gated apply that requires the exact typed confirmation phrase (not a bare "yes", since this
 // can install/remove/downgrade packages across the system), the operator-policy env flag, and
 // the same disk/clock/dpkg safety gate the other gated repairs use. It never unholds a package.
-func runAPTFixBrokenRepairFlow(exec repohealer.Executor) {
+func runAPTFixBrokenRepairFlow(client *ssh.Client, exec repohealer.Executor) {
 	fmt.Println(Cyan + Bold + "\n[+] APT Fix-Broken-Install: building a read-only preview..." + Reset)
 
 	preview, err := repohealer.BuildAPTFixBrokenPreview(exec)
@@ -71,6 +73,17 @@ func runAPTFixBrokenRepairFlow(exec repohealer.Executor) {
 		}
 		fmt.Println("\n" + repohealer.FormatAPTFixBrokenApprovalResult(execution))
 		appendAPTFixBrokenRepairAudit(auditPath, execution)
+		recordSnapshotHistory(
+			client,
+			"Option 7 mode [5]",
+			"apt-fix-broken-install",
+			"",
+			"",
+			nil,
+			repohealer.ManagerAPT,
+			"",
+			repohealer.SnapshotHistoryResultBlocked,
+		)
 		return
 	}
 
@@ -94,6 +107,38 @@ func runAPTFixBrokenRepairFlow(exec repohealer.Executor) {
 	execution := repohealer.ApproveAndApplyAPTFixBrokenRepair(exec, preview, confirmation)
 	fmt.Println("\n" + repohealer.FormatAPTFixBrokenApprovalResult(execution))
 	appendAPTFixBrokenRepairAudit(auditPath, execution)
+	recordSnapshotHistory(
+		client,
+		"Option 7 mode [5]",
+		"apt-fix-broken-install",
+		execution.ApplyResult.Snapshot.ID,
+		execution.ApplyResult.Snapshot.Path,
+		[]string{"/var/lib/dpkg/status", "/var/lib/dpkg/status-old"},
+		repohealer.ManagerAPT,
+		"",
+		snapshotHistoryResultForAPTFixBroken(execution.Status, execution.ApplyResult.RolledBack),
+	)
+}
+
+// snapshotHistoryResultForAPTFixBroken maps the fix-broken repair's own approval status onto
+// Option 9's shared history result vocabulary.
+func snapshotHistoryResultForAPTFixBroken(
+	status repohealer.APTFixBrokenApprovalStatus,
+	rolledBack bool,
+) string {
+	switch status {
+	case repohealer.APTFixBrokenApprovalStatusApplied:
+		return repohealer.SnapshotHistoryResultApplied
+	case repohealer.APTFixBrokenApprovalStatusDeclined:
+		return repohealer.SnapshotHistoryResultDeclined
+	case repohealer.APTFixBrokenApprovalStatusBlocked:
+		return repohealer.SnapshotHistoryResultBlocked
+	default:
+		if rolledBack {
+			return repohealer.SnapshotHistoryResultRolledBack
+		}
+		return repohealer.SnapshotHistoryResultFailed
+	}
 }
 
 func appendAPTFixBrokenRepairAudit(
