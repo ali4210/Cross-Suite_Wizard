@@ -226,8 +226,12 @@ func ApproveAndApplyAPTFixBrokenRepair(
 		return result
 	}
 
-	safety := EvaluateHashiCorpAPTListRepairSafety(exec)
-	if blocked, reason := safety.Blocked(); blocked {
+	// BlockedExcludingDpkgBroken, not Blocked: a broken dpkg database is the expected
+	// precondition for this repair — gating it on "dpkg must already be healthy" would make
+	// it permanently unable to run against the exact state it exists to fix. Disk space and
+	// clock skew still block normally.
+	safety := EvaluateGatedAPTRepairSafety(exec)
+	if blocked, reason := safety.BlockedExcludingDpkgBroken(); blocked {
 		result.Reason = reason
 		return result
 	}

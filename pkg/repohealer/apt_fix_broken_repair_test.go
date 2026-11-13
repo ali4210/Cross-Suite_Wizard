@@ -181,6 +181,69 @@ func TestApproveAndApplyAPTFixBrokenRepairAppliesWhenFullyApproved(t *testing.T)
 	}
 }
 
+// TestApproveAndApplyAPTFixBrokenRepairDoesNotBlockItselfOnTheBrokenStateItFixes is a
+// regression test for a real bug found by running this repair against a genuinely broken dpkg
+// state in a live ubuntu:24.04 container (dpkg -i of a .deb with an unmet dependency): the
+// safety gate's dpkg-health check blocked the repair with "dpkg --audit reports broken ...
+// packages" — but a broken dpkg state is exactly the precondition this repair exists to fix,
+// so it could never run against the one state that actually needs it. Every other mocked test
+// in this file happened to set the safety probe's dpkg --audit to empty/healthy, which is why
+// none of them caught this. The dpkg --audit text below is the exact real output captured from
+// that container.
+func TestApproveAndApplyAPTFixBrokenRepairDoesNotBlockItselfOnTheBrokenStateItFixes(t *testing.T) {
+	t.Setenv(APTFixBrokenRepairExecutionEnabledEnv, "true")
+
+	const realDpkgAuditOutput = "The following packages have been unpacked but not yet configured.\n" +
+		"They must be configured using dpkg --configure or the configure\n" +
+		"menu option in dselect for them to work:\n" +
+		" cross-suite-test-broken deliberately broken test package for repohealer integr"
+
+	exec := &fakeExecutor{
+		runOutputs: []string{safeNetworkFactsProbeOutput()},
+		// First RunSudo call is the safety gate's own dpkg --audit probe, deliberately
+		// reporting the SAME broken package the repair is about to fix — this must not
+		// block. Second is the apply step's targeted snapshot creation.
+		runSudoOutputs: []string{realDpkgAuditOutput, ""},
+		runSudoLabelOutputs: []string{
+			"The following packages will be REMOVED:\n  cross-suite-test-broken\n0 upgraded, 0 newly installed, 1 to remove and 0 not upgraded.",
+			"", // dpkg --audit after repair: clean
+			"", // apt-get update after repair: clean
+		},
+	}
+
+	got := ApproveAndApplyAPTFixBrokenRepair(exec, readyAPTFixBrokenPreview(), aptFixBrokenRepairConfirmation)
+
+	if got.Status != APTFixBrokenApprovalStatusApplied {
+		t.Fatalf(
+			"status = %q, want applied — the repair must not block itself on the broken state it exists to fix (reason: %s)",
+			got.Status,
+			got.Reason,
+		)
+	}
+}
+
+func TestHashiCorpAPTListRepairSafetyBlockedExcludingDpkgBrokenIgnoresDpkg(t *testing.T) {
+	safety := HashiCorpAPTListRepairSafety{
+		DpkgBroken:      true,
+		DpkgAuditOutput: "some broken package",
+	}
+
+	if blocked, reason := safety.BlockedExcludingDpkgBroken(); blocked {
+		t.Fatalf("expected dpkg-broken to be excluded from this check, got blocked: %s", reason)
+	}
+
+	// Disk space and clock skew must still block normally.
+	safety = HashiCorpAPTListRepairSafety{DiskSpaceLow: true, DiskEvidence: "disk full"}
+	if blocked, _ := safety.BlockedExcludingDpkgBroken(); !blocked {
+		t.Fatal("expected low disk space to still block")
+	}
+
+	safety = HashiCorpAPTListRepairSafety{ClockSkewSuspected: true, ClockEvidence: "clock skewed"}
+	if blocked, _ := safety.BlockedExcludingDpkgBroken(); !blocked {
+		t.Fatal("expected clock skew to still block")
+	}
+}
+
 func TestApproveAndApplyAPTFixBrokenRepairNeverUnholdsPackages(t *testing.T) {
 	// apt --fix-broken install never receives an unhold flag anywhere in this package;
 	// guard that invariant directly against the apply script.
