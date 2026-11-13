@@ -49,6 +49,30 @@ func EvaluateHashiCorpAPTListRepairSafety(exec Executor) HashiCorpAPTListRepairS
 // Blocked reports whether the safety gate forbids applying the repair, and a plain-language
 // explanation (reason) plus the next step the operator should take.
 func (s HashiCorpAPTListRepairSafety) Blocked() (bool, string) {
+	if blocked, reason := s.blockedOnDiskOrClock(); blocked {
+		return true, reason
+	}
+
+	if s.DpkgBroken {
+		return true, "BLOCKED: dpkg --audit reports broken or inconsistent packages, so apt-get update " +
+			"cannot safely run:\n" + s.DpkgAuditOutput +
+			"\nNext step: review the packages above, then use the gated 'apt --fix-broken install' " +
+			"repair (Option 7) before retrying this repair."
+	}
+
+	return false, ""
+}
+
+// BlockedExcludingDpkgBroken is Blocked without the dpkg-health check: a broken dpkg database
+// is the expected precondition for the apt --fix-broken install repair itself, so gating that
+// repair on "dpkg must already be healthy" would make it permanently unable to run against the
+// exact state it exists to resolve. Disk space and clock skew still block normally — neither of
+// those is something this repair fixes.
+func (s HashiCorpAPTListRepairSafety) BlockedExcludingDpkgBroken() (bool, string) {
+	return s.blockedOnDiskOrClock()
+}
+
+func (s HashiCorpAPTListRepairSafety) blockedOnDiskOrClock() (bool, string) {
 	switch {
 	case s.DiskSpaceLow:
 		return true, "BLOCKED: the root filesystem is at or near capacity (" + s.DiskEvidence +
@@ -58,11 +82,6 @@ func (s HashiCorpAPTListRepairSafety) Blocked() (bool, string) {
 		return true, "BLOCKED: the target host's clock appears to be significantly out of sync (" +
 			s.ClockEvidence + "). Next step: fix NTP/time sync on the target before retrying; " +
 			"TLS and GPG signature verification can fail, or falsely succeed, with a skewed clock."
-	case s.DpkgBroken:
-		return true, "BLOCKED: dpkg --audit reports broken or inconsistent packages, so apt-get update " +
-			"cannot safely run:\n" + s.DpkgAuditOutput +
-			"\nNext step: review the packages above, then use the gated 'apt --fix-broken install' " +
-			"repair (Option 7) before retrying this repair."
 	default:
 		return false, ""
 	}

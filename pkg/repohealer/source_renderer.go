@@ -45,7 +45,42 @@ func RenderAPTSource(profile VendorProfile, input SourceRenderInput) (string, er
 			suite,
 		), nil
 
+	case "postgresql-pgdg":
+		suite, err := ResolveCodenameSuite(profile, input)
+		if err != nil {
+			return "", err
+		}
+
+		return fmt.Sprintf(
+			"deb [arch=%s signed-by=%s] %s %s %s",
+			architecture,
+			profile.KeyringPath,
+			profile.AllowedURLPrefixes[0],
+			suite,
+			profile.Components,
+		), nil
+
+	case "jenkins":
+		// Jenkins publishes a "flat" repository (no Suites/Components split): a single
+		// directory URL with a trailing slash, and no arch= directive in its documented line.
+		return fmt.Sprintf(
+			"deb [signed-by=%s] %s %s",
+			profile.KeyringPath,
+			profile.AllowedURLPrefixes[0],
+			profile.Suite,
+		), nil
+
 	default:
+		if profile.Suite != "" && profile.Components != "" {
+			return fmt.Sprintf(
+				"deb [arch=%s signed-by=%s] %s %s %s",
+				architecture,
+				profile.KeyringPath,
+				profile.AllowedURLPrefixes[0],
+				profile.Suite,
+				profile.Components,
+			), nil
+		}
 		return "", fmt.Errorf("no APT source renderer is implemented for profile %q", profile.ID)
 	}
 }
@@ -93,9 +128,66 @@ func RenderAPTDeb822Source(profile VendorProfile, input SourceRenderInput) (stri
 			profile.KeyringPath,
 		), nil
 
+	case "postgresql-pgdg":
+		suite, err := ResolveCodenameSuite(profile, input)
+		if err != nil {
+			return "", err
+		}
+
+		return fmt.Sprintf(
+			"Types: deb\n"+
+				"URIs: %s\n"+
+				"Suites: %s\n"+
+				"Components: %s\n"+
+				"Architectures: %s\n"+
+				"Signed-By: %s\n",
+			profile.AllowedURLPrefixes[0],
+			suite,
+			profile.Components,
+			architecture,
+			profile.KeyringPath,
+		), nil
+
 	default:
+		if profile.Suite != "" && profile.Components != "" {
+			return fmt.Sprintf(
+				"Types: deb\n"+
+					"URIs: %s\n"+
+					"Suites: %s\n"+
+					"Components: %s\n"+
+					"Architectures: %s\n"+
+					"Signed-By: %s\n",
+				profile.AllowedURLPrefixes[0],
+				profile.Suite,
+				profile.Components,
+				architecture,
+				profile.KeyringPath,
+			), nil
+		}
 		return "", fmt.Errorf("no Deb822 APT source renderer is implemented for profile %q", profile.ID)
 	}
+}
+
+// ResolveCodenameSuite resolves a vendor profile whose suite is the target's own distro
+// codename plus a fixed suffix (e.g. PostgreSQL PGDG's "<codename>-pgdg"), restricted to the
+// codenames that vendor documents support. Unlike ResolveDockerDebianSuite (which maps a
+// codename to a different, fixed upstream suite name), this one just validates the codename
+// against the documented support list and appends the suffix — no renaming.
+func ResolveCodenameSuite(profile VendorProfile, input SourceRenderInput) (string, error) {
+	codename := strings.ToLower(strings.TrimSpace(input.Codename))
+
+	for _, supported := range profile.SupportedCodenames {
+		if codename == supported {
+			return codename + profile.CodenameSuiteSuffix, nil
+		}
+	}
+
+	return "", fmt.Errorf(
+		"%s suite review required: unsupported codename %q (supported: %s)",
+		profile.DisplayName,
+		codename,
+		strings.Join(profile.SupportedCodenames, ", "),
+	)
 }
 
 func ResolveDockerDebianSuite(input SourceRenderInput) (string, error) {

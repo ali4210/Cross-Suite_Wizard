@@ -3479,6 +3479,52 @@ func recordCustomRepoAudit(
 	)
 }
 
+// confirmCustomRepositoryKeyFingerprint is the "confirm-the-fingerprint" mode for a repository
+// with no known VendorProfile: it downloads the candidate signing key only from the repository
+// operator's own supplied HTTPS URL (never a keyserver), shows the full downloaded fingerprint,
+// checks the operator-policy env var before even asking for confirmation, runs the same
+// disk/clock/dpkg safety gate every other gated APT repair uses, and requires the operator to
+// type that exact fingerprint back — not a bare "yes" — before any system change. It makes no
+// change itself; the caller still creates its own snapshot and performs the atomic install,
+// which re-verifies the fingerprint a second time immediately before installing the key.
+func confirmCustomRepositoryKeyFingerprint(
+	client *ssh.Client,
+	exec repohealer.Executor,
+	keyURL string,
+) (fingerprint string, confirmed bool) {
+	preview, previewErr := repohealer.PreviewCustomRepositoryKeyFingerprint(exec, keyURL)
+	if previewErr != nil {
+		fmt.Println(Red + Bold + fmt.Sprintf("[!] Could not preview the signing key fingerprint: %v", previewErr) + Reset)
+		return "", false
+	}
+
+	fmt.Println(Yellow + Bold + "\n[!] UNVERIFIED VENDOR: this repository has no known profile in Cross-Suite." + Reset)
+	fmt.Println(Yellow + fmt.Sprintf("Downloaded signing key fingerprint: %s", preview) + Reset)
+	fmt.Println(Yellow + "Verify this EXACT fingerprint against the repository's own official documentation before continuing." + Reset)
+
+	if !printOperatorPolicyGateIfDisabled(
+		repohealer.CustomKeyRepairExecutionEnabledEnv,
+		repohealer.CustomKeyRepairExecutionEnabled(),
+	) {
+		return "", false
+	}
+
+	safety := repohealer.EvaluateGatedAPTRepairSafety(exec)
+	if blocked, reason := safety.Blocked(); blocked {
+		fmt.Println(Yellow + reason + Reset)
+		return "", false
+	}
+
+	typed := strings.TrimSpace(transfer.ReadRealtimeInput("Type the exact fingerprint shown above to confirm, or anything else to cancel: "))
+	if repohealer.NormalizeFingerprint(typed) != repohealer.NormalizeFingerprint(preview) {
+		fmt.Println(Yellow + "Fingerprint confirmation did not match. No system changes were made." + Reset)
+		return "", false
+	}
+
+	fmt.Println(Green + "Fingerprint confirmed." + Reset)
+	return preview, true
+}
+
 // InjectCustomRepoIndexed writes uniquely named custom repos with smart .repo vs baseurl
 // detection. The repo URL and optional GPG key URL are strictly validated, the target file
 // (and keyring, if a key is supplied) is snapshotted before any write via the same mechanism
@@ -3553,6 +3599,16 @@ fi
 		keyringFile = strings.TrimSuffix(strings.Replace(repoFile, "/sources.list.d/", "/keyrings/", 1), ".list") + ".gpg"
 	}
 
+	confirmedFingerprint := ""
+	if isAPT && keyringFile != "" {
+		fingerprint, confirmed := confirmCustomRepositoryKeyFingerprint(client, exec, keyURL)
+		if !confirmed {
+			recordCustomRepoAudit(client, validatedURL, keyURL, "", "", nil, false, repohealer.RepairFailureBlocked)
+			return
+		}
+		confirmedFingerprint = fingerprint
+	}
+
 	snapTargets := []string{repoFile}
 	if keyringFile != "" {
 		snapTargets = append(snapTargets, keyringFile)
@@ -3574,13 +3630,30 @@ fi
 			signedBy = fmt.Sprintf("[signed-by=%s]", keyringFile)
 			keyFetch = fmt.Sprintf(`
 mkdir -p "$(dirname %s)"
-if curl -fsSL %s | gpg --dearmor -o %s 2>/dev/null; then
-	chmod 0644 %s
-else
+TMPKEY=$(mktemp)
+trap 'rm -f "$TMPKEY"' EXIT
+if ! curl -fsSL --proto '=https' --tlsv1.2 %s -o "$TMPKEY"; then
 	echo "CUSTOM_REPO_ERROR|key_fetch_failed"
 	exit 1
 fi
-`, strconv.Quote(keyringFile), strconv.Quote(keyURL), strconv.Quote(keyringFile), strconv.Quote(keyringFile))
+ACTUAL_FP=$(gpg --show-keys --with-colons --fingerprint "$TMPKEY" 2>/dev/null | awk -F: '$1=="fpr"{print toupper($10)}' | sort -u | tr -d '\n')
+if [ "$ACTUAL_FP" != %q ]; then
+	echo "CUSTOM_REPO_ERROR|fingerprint_mismatch|expected=%s|actual=$ACTUAL_FP"
+	exit 1
+fi
+if ! gpg --dearmor -o %s "$TMPKEY" 2>/dev/null; then
+	echo "CUSTOM_REPO_ERROR|key_fetch_failed"
+	exit 1
+fi
+chmod 0644 %s
+`,
+				strconv.Quote(keyringFile),
+				strconv.Quote(keyURL),
+				confirmedFingerprint,
+				confirmedFingerprint,
+				strconv.Quote(keyringFile),
+				strconv.Quote(keyringFile),
+			)
 		}
 		script = fmt.Sprintf(`#!/bin/bash
 set -u

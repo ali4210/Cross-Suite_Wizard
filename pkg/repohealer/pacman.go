@@ -97,6 +97,9 @@ pacman -Sy 2>&1
 		})
 	}
 
+	keyringNames := pacmanKeyringNamesForDistribution(facts.Distribution)
+	populateCommand := "pacman-key --populate " + strings.Join(keyringNames, " ")
+
 	switch {
 	case strings.Contains(keyringCheck, "KEYRING_UNINITIALIZED"):
 		// Real wording (verified against a live Arch container with no keyring):
@@ -111,8 +114,8 @@ pacman -Sy 2>&1
 			ID:              "pacman-keyring-refresh",
 			FindingCode:     "PACMAN_KEYRING_INVALID",
 			Risk:            RiskApprovalNeeded,
-			Description:     "Reinitialize and refresh the pacman keyring from the distribution's trusted keyring package.",
-			Commands:        []string{"pacman-key --init", "pacman-key --populate archlinux", "pacman-key --refresh-keys"},
+			Description:     "Reinitialize and refresh the pacman keyring from the distribution's trusted keyring package(s).",
+			Commands:        []string{"pacman-key --init", populateCommand, "pacman-key --refresh-keys"},
 			Verification:    []string{"pacman-key --list-keys"},
 			RequiresConsent: true,
 			Eligible:        true,
@@ -123,7 +126,7 @@ pacman -Sy 2>&1
 			Severity:        SeverityError,
 			Risk:            RiskApprovalNeeded,
 			Evidence:        "pacman's keyring is not initialized (pacman-key --list-keys failed), which blocks any signed package install.",
-			RecommendedFix:  "Reinitialize and populate the pacman keyring (pacman-key --init, --populate archlinux, --refresh-keys).",
+			RecommendedFix:  "Reinitialize and populate the pacman keyring (pacman-key --init, " + populateCommand + ", --refresh-keys).",
 			AutoRepairable:  true,
 			RequiresConsent: true,
 		})
@@ -135,8 +138,8 @@ pacman -Sy 2>&1
 			ID:              "pacman-keyring-refresh",
 			FindingCode:     "PACMAN_KEYRING_INVALID",
 			Risk:            RiskApprovalNeeded,
-			Description:     "Reinitialize and refresh the pacman keyring from the distribution's trusted keyring package.",
-			Commands:        []string{"pacman-key --init", "pacman-key --populate archlinux", "pacman-key --refresh-keys"},
+			Description:     "Reinitialize and refresh the pacman keyring from the distribution's trusted keyring package(s).",
+			Commands:        []string{"pacman-key --init", populateCommand, "pacman-key --refresh-keys"},
 			Verification:    []string{"pacman -Sy"},
 			RequiresConsent: true,
 			Eligible:        true,
@@ -147,7 +150,7 @@ pacman -Sy 2>&1
 			Severity:        SeverityError,
 			Risk:            RiskApprovalNeeded,
 			Evidence:        "pacman reported an invalid, untrusted, or unknown package signature during sync.",
-			RecommendedFix:  "Reinitialize and refresh the pacman keyring (pacman-key --init, --populate archlinux, --refresh-keys).",
+			RecommendedFix:  "Reinitialize and refresh the pacman keyring (pacman-key --init, " + populateCommand + ", --refresh-keys).",
 			AutoRepairable:  true,
 			RequiresConsent: true,
 		})
@@ -212,4 +215,26 @@ pacman -Sy 2>&1
 	}
 
 	return evidence, findings, actions
+}
+
+// pacmanKeyringNamesForDistribution returns the pacman-key --populate keyring name(s) for the
+// target's distribution (its /etc/os-release ID=), so an Arch derivative with its own separate
+// keyring package gets both populated, not just "archlinux".
+//
+// Manjaro is verified against a live manjarolinux/base container (2026-11-13): its
+// /usr/share/pacman/keyrings/ contains both an "archlinux" and a separate "manjaro" keyring
+// (backed by the manjaro-keyring package), and Manjaro's own tooling populates both.
+//
+// EndeavourOS and Artix are NOT verified against a live container in this pass (time
+// constraints) — EndeavourOS defaults to plain "archlinux" here because, unlike Manjaro, it is
+// not known to ship a separate keyring package of its own; Artix also defaults to "archlinux"
+// for the same reason, though Artix's init-system variants could plausibly differ and should
+// be re-verified against a real Artix container before being relied on.
+func pacmanKeyringNamesForDistribution(distribution string) []string {
+	switch strings.ToLower(strings.TrimSpace(distribution)) {
+	case "manjaro":
+		return []string{"archlinux", "manjaro"}
+	default:
+		return []string{"archlinux"}
+	}
 }
