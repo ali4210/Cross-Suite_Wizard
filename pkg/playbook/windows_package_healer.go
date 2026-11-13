@@ -35,6 +35,8 @@ const (
 	verifyChocoSourceList    = "choco source list"
 	scriptScoopCheckupUpdate = "scoop checkup; scoop update"
 	verifyScoopBucketList    = "scoop bucket list"
+	scriptScoopAddMainBucket = "scoop bucket add main"
+	verifyScoopMainBucket    = "scoop bucket list"
 	scriptSetExecPolicy      = "Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force"
 	verifyGetExecPolicy      = "Get-ExecutionPolicy -Scope CurrentUser"
 	scriptEnableTLS12        = "[System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072"
@@ -50,6 +52,7 @@ func WindowsFixActionScriptsForCI() []string {
 		scriptChocoClearLibBad, verifyChocoLibBadCount,
 		scriptChocoResetSource, verifyChocoSourceList,
 		scriptScoopCheckupUpdate, verifyScoopBucketList,
+		scriptScoopAddMainBucket, verifyScoopMainBucket,
 		scriptSetExecPolicy, verifyGetExecPolicy,
 		scriptEnableTLS12, verifyTLSProtocol,
 	}
@@ -212,7 +215,15 @@ if (Get-Command choco -ErrorAction SilentlyContinue) {
 Write-Output '=== SCOOP ==='
 if (Get-Command scoop -ErrorAction SilentlyContinue) {
     Write-Output 'PRESENT'
-    try { scoop bucket list 2>&1 } catch { Write-Output "BUCKET_LIST_ERROR: $($_.Exception.Message)" }
+    try {
+        $buckets = scoop bucket list 2>&1
+        $buckets
+        if ($buckets -match '(?m)^\s*main\s') {
+            Write-Output 'MAIN_BUCKET_PRESENT'
+        } else {
+            Write-Output 'MAIN_BUCKET_MISSING'
+        }
+    } catch { Write-Output "BUCKET_LIST_ERROR: $($_.Exception.Message)" }
 } else {
     Write-Output 'MISSING'
 }
@@ -338,6 +349,22 @@ func diagnoseWindowsPackageManagers(client *ssh.Client) ([]repohealer.Finding, [
 			Description: "Run scoop checkup and update",
 			Script:      scriptScoopCheckupUpdate,
 			Verify:      verifyScoopBucketList,
+		})
+	} else if strings.Contains(scoop, "MAIN_BUCKET_MISSING") {
+		findings = append(findings, repohealer.Finding{
+			Code:            "SCOOP_MAIN_BUCKET_MISSING",
+			Severity:        repohealer.SeverityInfo,
+			Risk:            repohealer.RiskAutoSafe,
+			Evidence:        "Scoop's known-good default \"main\" bucket is not registered, which blocks installing most common Scoop packages.",
+			RecommendedFix:  "Add Scoop's official default bucket back (scoop bucket add main).",
+			AutoRepairable:  true,
+			RequiresConsent: true,
+		})
+		actions = append(actions, windowsPackageFix{
+			ID:          "scoop-add-main-bucket",
+			Description: "Add Scoop's known-good default \"main\" bucket",
+			Script:      scriptScoopAddMainBucket,
+			Verify:      verifyScoopMainBucket,
 		})
 	}
 
