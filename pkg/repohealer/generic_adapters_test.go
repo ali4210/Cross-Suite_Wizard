@@ -166,6 +166,58 @@ func TestPacmanAdapterKeyringInvalidProposesRefresh(t *testing.T) {
 // contain "signature"/"invalid"/"unknown trust". This is also the far more common
 // real-world keyring failure (a fresh/uninitialized keyring) vs. a genuinely invalid
 // signature, and `pacman -Sy` alone never exercises signature checking at all.
+// TestPacmanAdapterUsesManjaroAndArchlinuxKeyringsOnManjaro is a regression test: Manjaro
+// (ID=manjaro in /etc/os-release, verified against a live manjarolinux/base container,
+// 2026-11-13) ships its own "manjaro" keyring under /usr/share/pacman/keyrings/ in addition to
+// "archlinux", and a keyring refresh must populate both — populating only "archlinux" (the old
+// hardcoded behavior) leaves Manjaro-signed packages untrusted.
+func TestPacmanAdapterUsesManjaroAndArchlinuxKeyringsOnManjaro(t *testing.T) {
+	exec := &fakeExecutor{
+		runSudoOutputs: append(
+			pacmanBaselineOutputs("LOCK_ABSENT\nPACMAN_NOT_RUNNING\n"),
+			"ok\n",
+		),
+	}
+	exec.runSudoOutputs[1] = "KEYRING_UNINITIALIZED\n"
+
+	_, _, actions := PacmanAdapter{}.Diagnose(exec, TargetFacts{Distribution: "manjaro"}, Policy{})
+
+	if len(actions) != 1 {
+		t.Fatalf("expected exactly one action, got %d: %+v", len(actions), actions)
+	}
+	wantPopulate := "pacman-key --populate archlinux manjaro"
+	if actions[0].Commands[1] != wantPopulate {
+		t.Fatalf("populate command = %q, want %q", actions[0].Commands[1], wantPopulate)
+	}
+}
+
+// TestPacmanAdapterUsesPlainArchlinuxKeyringOnArchAndUnknownDistributions confirms plain Arch
+// (and any distribution this adapter has no specific keyring data for) keeps the original
+// archlinux-only behavior.
+func TestPacmanAdapterUsesPlainArchlinuxKeyringOnArchAndUnknownDistributions(t *testing.T) {
+	for _, distribution := range []string{"arch", "endeavouros", "artix", ""} {
+		t.Run(distribution, func(t *testing.T) {
+			exec := &fakeExecutor{
+				runSudoOutputs: append(
+					pacmanBaselineOutputs("LOCK_ABSENT\nPACMAN_NOT_RUNNING\n"),
+					"ok\n",
+				),
+			}
+			exec.runSudoOutputs[1] = "KEYRING_UNINITIALIZED\n"
+
+			_, _, actions := PacmanAdapter{}.Diagnose(exec, TargetFacts{Distribution: distribution}, Policy{})
+
+			if len(actions) != 1 {
+				t.Fatalf("expected exactly one action, got %d: %+v", len(actions), actions)
+			}
+			wantPopulate := "pacman-key --populate archlinux"
+			if actions[0].Commands[1] != wantPopulate {
+				t.Fatalf("populate command = %q, want %q", actions[0].Commands[1], wantPopulate)
+			}
+		})
+	}
+}
+
 func TestPacmanAdapterUninitializedKeyringMatchesRealWording(t *testing.T) {
 	exec := &fakeExecutor{
 		runSudoOutputs: append(
