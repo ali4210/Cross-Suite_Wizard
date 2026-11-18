@@ -2,8 +2,7 @@ package rbac
 
 import (
 	"bufio"
-	"crypto/rand"
-	"crypto/sha512"
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -51,10 +50,12 @@ type HostSignature struct {
 	PrimaryIP string
 }
 
+// ProvisionPayload intentionally carries no password or password hash field.
+// The password is set in a separate step (setLinuxPasswordViaChpasswd) that feeds
+// it to the remote `chpasswd` exclusively over the SSH session's stdin pipe, so it
+// is never embedded in this JSON blob, a command string, or any argv visible to `ps`.
 type ProvisionPayload struct {
 	Username                 string `json:"username"`
-	Password                 string `json:"password"`
-	PasswordHash             string `json:"password_hash"`
 	ForceExpire              bool   `json:"force_expire"`
 	MaxDays                  int    `json:"max_days"`
 	AssignedIP               string `json:"assigned_ip"`
@@ -68,13 +69,13 @@ type ProvisionPayload struct {
 // ====================================================================
 
 var portPresets = map[string][]string{
-	"🌐 Web":       {"80", "443", "8080", "8443"},
-	"🗄️  Database":  {"3306", "5432", "27017", "6379", "1433", "1521"},
-	"🔑 SSH":       {"22"},
+	"🌐 Web":          {"80", "443", "8080", "8443"},
+	"🗄️  Database":   {"3306", "5432", "27017", "6379", "1433", "1521"},
+	"🔑 SSH":          {"22"},
 	"☸️  Kubernetes": {"6443", "10250", "10255"},
-	"🐳 Docker":    {"2375", "2376"},
-	"📊 Monitoring": {"9090", "9100", "3000"},
-	"📦 Others":    {"25", "53", "123", "161", "389", "636", "1194", "3389", "5900", "5901"},
+	"🐳 Docker":       {"2375", "2376"},
+	"📊 Monitoring":   {"9090", "9100", "3000"},
+	"📦 Others":       {"25", "53", "123", "161", "389", "636", "1194", "3389", "5900", "5901"},
 }
 
 // ====================================================================
@@ -525,7 +526,7 @@ uid = str(pwd.getpwnam(u).pw_uid)
 for iteration in range(20):
     proc = subprocess.run(['iptables', '-L', 'OUTPUT', '-n', '--line-numbers'], capture_output=True, text=True)
     nums = []
-    for line in lines:
+    for line in proc.stdout.splitlines():
         if 'owner UID match ' + uid in line and 'ACCEPT' in line and 'tcp' not in line:
             parts = line.split()
             if parts and parts[0].isdigit():
@@ -561,27 +562,32 @@ print('ALL_REMOVED')
 `, username)
 	}
 
-	out, err := common.ExecuteRemoteCommand(client, wrapSudo(script), common.DefaultCmdTimeout)
-	if err == nil {
-		switch {
-		case action == "add" && strings.Contains(out, "PORT_ALLOW_ADDED"):
-			fmt.Printf(common.Green+"[✔] Port %s allowed for user %s.\n"+common.Reset, port, username)
-		case action == "add-all" && strings.Contains(out, "ALL_ALLOWED"):
-			fmt.Printf(common.Green+"[✔] ALL traffic allowed for user %s.\n"+common.Reset, username)
-		case strings.Contains(out, "ERROR"):
-			fmt.Printf(common.Red+"[!] Error: %s\n"+common.Reset, out)
-		case action == "remove" && strings.Contains(out, "PORT_ALLOW_REMOVED"):
-			fmt.Printf(common.Green+"[✔] Port %s rule removed for user %s.\n"+common.Reset, port, username)
-		case action == "remove-blanket" && strings.Contains(out, "BLANKET_REMOVED"):
-			fmt.Printf(common.Green+"[✔] Blanket Allow-All rule removed for user %s.\n"+common.Reset, username)
-		case action == "remove-all" && strings.Contains(out, "ALL_REMOVED"):
-			fmt.Printf(common.Green+"[✔] ALL port rules removed for user %s.\n"+common.Reset, username)
-		default:
-			fmt.Println(common.Yellow + "[!] Operation completed." + common.Reset)
-		}
-	} else {
-		fmt.Printf(common.Red+"[!] Error: %v\nOutput: %s\n"+common.Reset, err, out)
+	// F-03: every action has exactly one success marker. Anything else — a Python
+	// traceback, a non-zero exit, empty output — is reported as a failure with the
+	// real remote output shown, never a generic "Operation completed." success message.
+	successMarker := map[string]string{
+		"add":            "PORT_ALLOW_ADDED",
+		"add-all":        "ALL_ALLOWED",
+		"remove":         "PORT_ALLOW_REMOVED",
+		"remove-blanket": "BLANKET_REMOVED",
+		"remove-all":     "ALL_REMOVED",
 	}
+	successMsg := map[string]string{
+		"add":            fmt.Sprintf("[✔] Port %s allowed for user %s.", port, username),
+		"add-all":        fmt.Sprintf("[✔] ALL traffic allowed for user %s.", username),
+		"remove":         fmt.Sprintf("[✔] Port %s rule removed for user %s.", port, username),
+		"remove-blanket": fmt.Sprintf("[✔] Blanket Allow-All rule removed for user %s.", username),
+		"remove-all":     fmt.Sprintf("[✔] ALL port rules removed for user %s.", username),
+	}
+
+	out, err := common.ExecuteRemoteCommand(client, wrapSudo(script), common.DefaultCmdTimeout)
+	marker := successMarker[action]
+	if err == nil && marker != "" && strings.Contains(out, marker) {
+		fmt.Println(common.Green + successMsg[action] + common.Reset)
+		return
+	}
+	fmt.Printf(common.Red+"[!] Port rule operation [%s] FAILED for user %s.\nError: %v\nRemote output: %s\n"+common.Reset,
+		action, username, err, strings.TrimSpace(out))
 }
 
 // ====================================================================
@@ -675,20 +681,72 @@ func wrapSudo(cmd string) string {
 	return fmt.Sprintf("printf '%%s\\n' '%s' | sudo -S bash -c 'echo \"%s\" | base64 -d | bash'", escapedPass, b64Payload)
 }
 
-func generateSha512Crypt(password string) string {
-	const itoa64 = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-	saltBytes := make([]byte, 16)
-	_, _ = rand.Read(saltBytes)
-	salt := ""
-	for _, b := range saltBytes {
-		salt += string(itoa64[int(b)%len(itoa64)])
+// executeWithStdin runs cmd over a fresh SSH session and feeds stdinLines (each followed
+// by a newline) directly into the session's live stdin pipe, then closes it. Used whenever
+// a secret (a password) must reach the remote command without ever being written into the
+// command text itself, so it never appears in argv, shell history, or `ps` on the remote
+// host. cmd must not depend on any stdin content beyond what stdinLines supplies.
+func executeWithStdin(client *ssh.Client, cmd string, stdinLines []string, timeout time.Duration) (string, error) {
+	session, err := client.NewSession()
+	if err != nil {
+		return "", fmt.Errorf("failed to open SSH session: %w", err)
+	}
+	defer session.Close()
+
+	stdinPipe, err := session.StdinPipe()
+	if err != nil {
+		return "", fmt.Errorf("failed to open stdin pipe: %w", err)
 	}
 
-	hash := sha512.New()
-	hash.Write([]byte(password + "$6$" + salt))
-	digest := hash.Sum(nil)
-	b64Digest := base64.RawStdEncoding.EncodeToString(digest)
-	return fmt.Sprintf("$6$%s$%s", salt, b64Digest)
+	var outBuf bytes.Buffer
+	session.Stdout = &outBuf
+	session.Stderr = &outBuf
+
+	if err := session.Start(cmd); err != nil {
+		return "", fmt.Errorf("failed to start command: %w", err)
+	}
+
+	go func() {
+		for _, line := range stdinLines {
+			fmt.Fprintf(stdinPipe, "%s\n", line)
+		}
+		_ = stdinPipe.Close()
+	}()
+
+	done := make(chan error, 1)
+	go func() { done <- session.Wait() }()
+
+	select {
+	case waitErr := <-done:
+		return outBuf.String(), waitErr
+	case <-time.After(timeout):
+		_ = session.Signal(ssh.SIGKILL)
+		_ = session.Close()
+		return "", fmt.Errorf("command timed out after %s", timeout)
+	}
+}
+
+// runPrivilegedWithSecretStdin elevates via `sudo -k -S bash -c "<remoteCmd>"` and feeds
+// the sudo password followed by each secretLine over the SSH session's live stdin pipe,
+// never as part of the command text. See F-01.
+func runPrivilegedWithSecretStdin(client *ssh.Client, remoteCmd string, secretLines []string, timeout time.Duration) (string, error) {
+	if localSudoPassword == "" {
+		return "", fmt.Errorf("no elevation credentials available")
+	}
+	escapedInner := strings.ReplaceAll(remoteCmd, "'", `'"'"'`)
+	wrapped := fmt.Sprintf("sudo -k -S bash -c '%s'", escapedInner)
+	return executeWithStdin(client, wrapped, append([]string{localSudoPassword}, secretLines...), timeout)
+}
+
+// setLinuxPasswordViaChpasswd sets a POSIX account's password using `chpasswd`, which
+// takes no arguments and reads "user:password" on stdin, so the plaintext never appears
+// in the remote process list, shell history, or any log this tool writes. See F-01.
+func setLinuxPasswordViaChpasswd(client *ssh.Client, username, password string, timeout time.Duration) error {
+	out, err := runPrivilegedWithSecretStdin(client, "chpasswd", []string{username + ":" + password}, timeout)
+	if err != nil {
+		return fmt.Errorf("chpasswd failed: %w (output: %s)", err, strings.TrimSpace(out))
+	}
+	return nil
 }
 
 func validateComplexPassword(pass string) bool {
@@ -1429,8 +1487,14 @@ func provisionNewIdentity(reader *bufio.Reader, client *ssh.Client) {
 	fmt.Println(common.Cyan + "[+] Provisioning identity on remote host (" + sig.OS + ")..." + common.Reset)
 
 	if sig.OS == "windows" {
-		winCmd := fmt.Sprintf(`powershell -Command "$sec = ConvertTo-SecureString '%s' -AsPlainText -Force; New-LocalUser -Name '%s' -Password $sec -PasswordNeverExpires:$true"`, password, username)
-		_, err := common.ExecuteRemoteCommand(client, winCmd, common.DefaultCmdTimeout)
+		// Password is read from the live SSH stdin pipe by [Console]::In.ReadLine(),
+		// never embedded in the command text, so it cannot appear in any transcript,
+		// command-line log, or `Get-Process` argument capture on the target. See F-01.
+		// NOTE: syntax-checked only (go vet/PowerShell AST) — no Windows target was
+		// available to verify New-LocalUser + login for real.
+		escapedUser := strings.ReplaceAll(username, "'", "''")
+		winCmd := fmt.Sprintf(`powershell -Command "$pw = [Console]::In.ReadLine(); $sec = ConvertTo-SecureString $pw -AsPlainText -Force; New-LocalUser -Name '%s' -Password $sec -PasswordNeverExpires:$true"`, escapedUser)
+		_, err := executeWithStdin(client, winCmd, []string{password}, common.DefaultCmdTimeout)
 		if err != nil {
 			fmt.Printf(common.Red+"[!] Windows provisioning error: %v\n"+common.Reset, err)
 		} else {
@@ -1441,8 +1505,16 @@ func provisionNewIdentity(reader *bufio.Reader, client *ssh.Client) {
 	}
 
 	if sig.OS == "darwin" {
-		macCmd := fmt.Sprintf(`sysadminctl -addUser "%s" -password "%s" -home "/Users/%s"`, username, password, username)
-		_, err := common.ExecuteRemoteCommand(client, wrapSudo(macCmd), common.DefaultCmdTimeout)
+		// `sysadminctl -password -` reads the password from stdin instead of argv, so
+		// it never appears in a command-line log or `ps` on the target. See F-01.
+		// NOTE: mocked/syntax-checked only — no macOS target was available to verify
+		// `sysadminctl -addUser ... -password -` + login for real.
+		// Deliberately uses runPrivilegedWithSecretStdin (sudo password, then the
+		// sysadminctl password, both on the live stdin pipe) rather than wrapSudo:
+		// wrapSudo's printf|sudo pipeline would disconnect sudo's child process from
+		// the session's real stdin, so a second stdin-delivered secret couldn't reach it.
+		macCmd := fmt.Sprintf(`sysadminctl -addUser "%s" -password - -home "/Users/%s"`, username, username)
+		_, err := runPrivilegedWithSecretStdin(client, macCmd, []string{password}, common.DefaultCmdTimeout)
 		if err != nil {
 			fmt.Printf(common.Red+"[!] macOS provisioning error: %v\n"+common.Reset, err)
 		} else {
@@ -1454,8 +1526,6 @@ func provisionNewIdentity(reader *bufio.Reader, client *ssh.Client) {
 
 	payload := ProvisionPayload{
 		Username:                 username,
-		Password:                 password,
-		PasswordHash:             generateSha512Crypt(password),
 		ForceExpire:              forceExpire == "y",
 		MaxDays:                  maxDays,
 		AssignedIP:               dedicatedIP,
@@ -1472,7 +1542,6 @@ import base64, json, os, subprocess, pwd
 
 data = json.loads(base64.b64decode('%s').decode('utf-8'))
 u = data['username']
-pwd_hash = data['password_hash']
 force_expire = data['force_expire']
 max_days = data['max_days']
 assigned_ip = data.get('assigned_ip', '')
@@ -1485,11 +1554,11 @@ try:
 except KeyError:
     subprocess.run(['useradd', '-m', '-s', '/bin/bash', u], check=True)
 
-try:
-    subprocess.run(['usermod', '-p', pwd_hash, u], check=True)
-except Exception:
-    p = subprocess.Popen(['chpasswd', '-e'], stdin=subprocess.PIPE, text=True)
-    p.communicate(input=f'{u}:{pwd_hash}\n')
+# NOTE: the account's password is set separately, after this script returns
+# PROVISION_SUCCESS, via setLinuxPasswordViaChpasswd (Go side), which feeds
+# "user:password" to chpasswd exclusively over the SSH session's stdin pipe.
+# It is never part of this payload so it never has to transit a JSON blob,
+# a shell command string, or any argv visible to 'ps'. See F-01.
 
 if max_days > 0:
     subprocess.run(['chage', '-M', str(max_days), '-W', '7', u], check=False)
@@ -1626,26 +1695,37 @@ print('PROVISION_SUCCESS')
 	out, err := common.ExecuteRemoteCommand(client, wrapSudo(remoteCmd), common.DefaultCmdTimeout)
 	if err != nil || !strings.Contains(out, "PROVISION_SUCCESS") {
 		fmt.Printf(common.Red+"[!] Provisioning error: %v\nOutput: %s\n"+common.Reset, err, out)
-	} else {
-		fmt.Println(common.Green + "✅ Identity successfully created for user [" + username + "]!" + common.Reset)
+		common.PausePrompt()
+		return
+	}
 
-		if dedicatedIP != "" {
-			fmt.Printf(common.Cyan+"[✔] Dedicated IP [%s] assigned to user [%s] on adapter [%s]\n"+common.Reset, dedicatedIP, username, boundIface)
-		}
+	// Account now exists; set its password exclusively over stdin (see F-01) — the
+	// plaintext is never part of the python payload above, a command string, or argv.
+	if pwErr := setLinuxPasswordViaChpasswd(client, username, password, common.DefaultCmdTimeout); pwErr != nil {
+		fmt.Printf(common.Red+"[!] Identity [%s] was created but setting its password failed: %v\n"+common.Reset, username, pwErr)
+		fmt.Println(common.Yellow + "=> The account exists with no usable password. Re-run password assignment or use SSH key login." + common.Reset)
+		common.PausePrompt()
+		return
+	}
 
-		if autoGenerateDedicatedKey {
-			fetchPrivCmd := fmt.Sprintf("cat /home/%s/.ssh/id_ed25519", username)
-			privKeyData, privErr := common.ExecuteRemoteCommand(client, wrapSudo(fetchPrivCmd), common.DefaultCmdTimeout)
-			if privErr == nil && strings.Contains(privKeyData, "PRIVATE KEY") {
-				home, _ := os.UserHomeDir()
-				localKeyFile := filepath.Join(home, ".ssh", fmt.Sprintf("%s_id_ed25519", username))
-				_ = os.WriteFile(localKeyFile, []byte(strings.TrimSpace(privKeyData)+"\n"), 0600)
-				fmt.Printf(common.Green+common.Bold+"[✔] Dedicated Private Key saved locally to: %s\n"+common.Reset, localKeyFile)
-				fmt.Printf(common.Yellow+"=> You can connect immediately using: ssh -i %s %s@<target-ip>\n"+common.Reset, localKeyFile, username)
-			}
-		} else if sshPubKey != "" {
-			fmt.Printf(common.Green+common.Bold+"[✔] Workstation public key linked! Connect immediately using: ssh %s@<target-ip>\n"+common.Reset, username)
+	fmt.Println(common.Green + "✅ Identity successfully created for user [" + username + "]!" + common.Reset)
+
+	if dedicatedIP != "" {
+		fmt.Printf(common.Cyan+"[✔] Dedicated IP [%s] assigned to user [%s] on adapter [%s]\n"+common.Reset, dedicatedIP, username, boundIface)
+	}
+
+	if autoGenerateDedicatedKey {
+		fetchPrivCmd := fmt.Sprintf("cat /home/%s/.ssh/id_ed25519", username)
+		privKeyData, privErr := common.ExecuteRemoteCommand(client, wrapSudo(fetchPrivCmd), common.DefaultCmdTimeout)
+		if privErr == nil && strings.Contains(privKeyData, "PRIVATE KEY") {
+			home, _ := os.UserHomeDir()
+			localKeyFile := filepath.Join(home, ".ssh", fmt.Sprintf("%s_id_ed25519", username))
+			_ = os.WriteFile(localKeyFile, []byte(strings.TrimSpace(privKeyData)+"\n"), 0600)
+			fmt.Printf(common.Green+common.Bold+"[✔] Dedicated Private Key saved locally to: %s\n"+common.Reset, localKeyFile)
+			fmt.Printf(common.Yellow+"=> You can connect immediately using: ssh -i %s %s@<target-ip>\n"+common.Reset, localKeyFile, username)
 		}
+	} else if sshPubKey != "" {
+		fmt.Printf(common.Green+common.Bold+"[✔] Workstation public key linked! Connect immediately using: ssh %s@<target-ip>\n"+common.Reset, username)
 	}
 	common.PausePrompt()
 }
@@ -1816,6 +1896,38 @@ os.chmod(reg, 0o644)
 // -----------------------------------------------------------------------------
 // [3] Multiple IP Stacking & Virtual Pingable IP Provisioner
 // -----------------------------------------------------------------------------
+
+// buildIPStackScript is the remote shell script run to bind a secondary IP and
+// record it in the registry. See F-02: an earlier version also wrote a
+// `Match User` / `AllowUsers <CIDR>` drop-in to /etc/ssh/sshd_config.d/, but
+// AllowUsers only matches usernames (optionally user@host) — a bare CIDR can
+// never match a username, so that rule silently locked the targeted user out
+// of SSH on every single IP assignment. Stacking an IP must never restrict SSH
+// access, so this script only binds the address and updates the registry; it
+// makes no sshd_config change at all.
+func buildIPStackScript(assignIP, iface, username string) string {
+	return fmt.Sprintf(`
+ip addr add %s dev %s 2>/dev/null || true
+
+python3 -c "
+import os
+for reg_f in ['/etc/cross_assigned_ips.txt', '/var/log/cross_assigned_ips.txt']:
+    lines = []
+    if os.path.exists(reg_f):
+        with open(reg_f, 'r') as f:
+            lines = [l for l in f if not l.startswith('%s:')]
+    lines.append('%s:%s\n')
+    with open(reg_f, 'w') as f:
+        f.writelines(lines)
+        f.flush()
+        os.fsync(f.fileno())
+    os.chmod(reg_f, 0o644)
+"
+
+echo "IP_PROVISION_OK"
+`, assignIP, iface, username, username, assignIP)
+}
+
 func assignIPAndVirtualInterface(reader *bufio.Reader, client *ssh.Client) {
 	fmt.Print("\033[H\033[2J")
 	fmt.Println(common.Cyan + common.Bold + "=== MULTIPLE IP STACKING & VIRTUAL PINGABLE INTERFACE ENGINE ===" + common.Reset)
@@ -1856,7 +1968,7 @@ func assignIPAndVirtualInterface(reader *bufio.Reader, client *ssh.Client) {
 		if sig.OS == "windows" {
 			psDel := `powershell -Command "Get-NetIPAddress | Where-Object {$_.InterfaceAlias -notmatch 'Loopback' -and $_.SkipAsSource -eq $true} | Remove-NetIPAddress -Confirm:$false"`
 			common.ExecuteRemoteCommand(client, psDel, common.DefaultCmdTimeout)
-			fmt.Printf(common.Green+"✅ Success: Stacked IP addresses purged on Windows host!\n"+common.Reset)
+			fmt.Printf(common.Green + "✅ Success: Stacked IP addresses purged on Windows host!\n" + common.Reset)
 			common.PausePrompt()
 			return
 		}
@@ -1959,41 +2071,15 @@ print('PURGE_IP_OK')
 		return
 	}
 
-	script := fmt.Sprintf(`
-ip addr add %s dev %s 2>/dev/null || true
-
-python3 -c "
-import os
-for reg_f in ['/etc/cross_assigned_ips.txt', '/var/log/cross_assigned_ips.txt']:
-    lines = []
-    if os.path.exists(reg_f):
-        with open(reg_f, 'r') as f:
-            lines = [l for l in f if not l.startswith('%s:')]
-    lines.append('%s:%s\n')
-    with open(reg_f, 'w') as f:
-        f.writelines(lines)
-        f.flush()
-        os.fsync(f.fileno())
-    os.chmod(reg_f, 0o644)
-"
-
-mkdir -p /etc/ssh/sshd_config.d/
-cat << 'EOF' > /etc/ssh/sshd_config.d/rbac_%s.conf
-Match User %s
-    AllowUsers %s
-EOF
-
-systemctl reload sshd 2>/dev/null || true
-echo "IP_PROVISION_OK"
-`, assignIP, selectedIface, username, username, assignIP, username, username, username)
+	script := buildIPStackScript(assignIP, selectedIface, username)
 
 	fmt.Println(common.Cyan + "[+] Stacking pingable IP onto adapter and updating registry..." + common.Reset)
 	out, err := common.ExecuteRemoteCommand(client, wrapSudo(script), common.DefaultCmdTimeout)
 
 	if err == nil && strings.Contains(out, "IP_PROVISION_OK") {
 		if ttlSeconds > 0 {
-			ttlCmd := fmt.Sprintf("systemd-run --unit=cross_ip_%s --on-active=%ds sh -c 'ip addr del %s dev %s 2>/dev/null; python3 -c \"import os; lines=[l for l in open(\\\"/etc/cross_assigned_ips.txt\\\") if not l.startswith(\\\"%s:\\\")]; open(\\\"/etc/cross_assigned_ips.txt\\\", \\\"w\\\").writelines(lines)\"; rm -f /etc/ssh/sshd_config.d/rbac_%s.conf && systemctl reload sshd'",
-				username, ttlSeconds, assignIP, selectedIface, username, username)
+			ttlCmd := fmt.Sprintf("systemd-run --unit=cross_ip_%s --on-active=%ds sh -c 'ip addr del %s dev %s 2>/dev/null; python3 -c \"import os; lines=[l for l in open(\\\"/etc/cross_assigned_ips.txt\\\") if not l.startswith(\\\"%s:\\\")]; open(\\\"/etc/cross_assigned_ips.txt\\\", \\\"w\\\").writelines(lines)\"'",
+				username, ttlSeconds, assignIP, selectedIface, username)
 			_, _ = common.ExecuteRemoteCommand(client, wrapSudo(ttlCmd), common.DefaultCmdTimeout)
 			fmt.Printf(common.Green+"✅ Success: Ephemeral Pingable IP [%s] stacked for user [%s] on [%s] (TTL: %d seconds)!\n"+common.Reset, assignIP, username, selectedIface, ttlSeconds)
 		} else {
