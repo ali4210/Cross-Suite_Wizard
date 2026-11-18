@@ -78,7 +78,7 @@ func RunWindowsPackageManagerHealer(client *ssh.Client) {
 		return
 	}
 
-	findings, actions, rawOutput := diagnoseWindowsPackageManagers(client)
+	findings, actions, rawOutput := diagnoseWindowsPackageManagers(windowsSSHExecutor{client: client})
 
 	result := repohealer.Result{
 		Mode: repohealer.ModeDiagnose,
@@ -235,11 +235,33 @@ Write-Output '=== TLS ==='
 ([System.Net.ServicePointManager]::SecurityProtocol)
 `
 
+// windowsSSHExecutor is this file's concrete implementation of the same injectable
+// repohealer.Executor interface the Homebrew/Emerge adapters use, so
+// diagnoseWindowsPackageManagers' parsing logic can be unit-tested with a fake in place of
+// a real SSH client. There is no separate "sudo" tier on this file's one transport
+// (runWindowsPowerShell's UTF16LE+base64 -EncodedCommand), so all three methods route
+// through it identically; behavior is unchanged from before this type existed.
+type windowsSSHExecutor struct {
+	client *ssh.Client
+}
+
+func (e windowsSSHExecutor) Run(command string) (string, error) {
+	return runWindowsPowerShell(e.client, command, "Diagnosing Windows Package Managers"), nil
+}
+
+func (e windowsSSHExecutor) RunSudo(script string) (string, error) {
+	return e.Run(script)
+}
+
+func (e windowsSSHExecutor) RunSudoWithLabel(script, label string) (string, error) {
+	return runWindowsPowerShell(e.client, script, label), nil
+}
+
 // diagnoseWindowsPackageManagers runs a single read-only PowerShell probe covering winget,
 // Chocolatey, Scoop, the PowerShell execution policy, and the TLS 1.2 setting, then turns
 // anything suspicious into findings and candidate fixes.
-func diagnoseWindowsPackageManagers(client *ssh.Client) ([]repohealer.Finding, []windowsPackageFix, string) {
-	output := runWindowsPowerShell(client, windowsDiagnosticProbeScript, "Diagnosing Windows Package Managers")
+func diagnoseWindowsPackageManagers(exec repohealer.Executor) ([]repohealer.Finding, []windowsPackageFix, string) {
+	output, _ := exec.Run(windowsDiagnosticProbeScript)
 	normalized := strings.ReplaceAll(output, "\r\n", "\n")
 	sections := splitWindowsFactSections(normalized)
 
@@ -324,7 +346,14 @@ func diagnoseWindowsPackageManagers(client *ssh.Client) ([]repohealer.Finding, [
 	}
 
 	scoop := sections["SCOOP"]
-	if strings.Contains(scoop, "MISSING") {
+	// Bug found while adding unit coverage for this function: checking for the
+	// substring "MISSING" here false-positived on "MAIN_BUCKET_MISSING" (which
+	// contains "MISSING"), misclassifying "Scoop is installed but its main
+	// bucket is missing" as "Scoop isn't installed at all" and never reaching
+	// the correct SCOOP_MAIN_BUCKET_MISSING branch below. The script always
+	// writes the literal 'PRESENT' line first when the tool is found, so check
+	// for that positively instead.
+	if !strings.Contains(scoop, "PRESENT") {
 		findings = append(findings, repohealer.Finding{
 			Code:            "SCOOP_MISSING",
 			Severity:        repohealer.SeverityInfo,
