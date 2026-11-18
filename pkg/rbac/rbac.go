@@ -69,13 +69,13 @@ type ProvisionPayload struct {
 // ====================================================================
 
 var portPresets = map[string][]string{
-	"🌐 Web":       {"80", "443", "8080", "8443"},
-	"🗄️  Database":  {"3306", "5432", "27017", "6379", "1433", "1521"},
-	"🔑 SSH":       {"22"},
+	"🌐 Web":          {"80", "443", "8080", "8443"},
+	"🗄️  Database":   {"3306", "5432", "27017", "6379", "1433", "1521"},
+	"🔑 SSH":          {"22"},
 	"☸️  Kubernetes": {"6443", "10250", "10255"},
-	"🐳 Docker":    {"2375", "2376"},
-	"📊 Monitoring": {"9090", "9100", "3000"},
-	"📦 Others":    {"25", "53", "123", "161", "389", "636", "1194", "3389", "5900", "5901"},
+	"🐳 Docker":       {"2375", "2376"},
+	"📊 Monitoring":   {"9090", "9100", "3000"},
+	"📦 Others":       {"25", "53", "123", "161", "389", "636", "1194", "3389", "5900", "5901"},
 }
 
 // ====================================================================
@@ -1968,7 +1968,7 @@ func assignIPAndVirtualInterface(reader *bufio.Reader, client *ssh.Client) {
 		if sig.OS == "windows" {
 			psDel := `powershell -Command "Get-NetIPAddress | Where-Object {$_.InterfaceAlias -notmatch 'Loopback' -and $_.SkipAsSource -eq $true} | Remove-NetIPAddress -Confirm:$false"`
 			common.ExecuteRemoteCommand(client, psDel, common.DefaultCmdTimeout)
-			fmt.Printf(common.Green+"✅ Success: Stacked IP addresses purged on Windows host!\n"+common.Reset)
+			fmt.Printf(common.Green + "✅ Success: Stacked IP addresses purged on Windows host!\n" + common.Reset)
 			common.PausePrompt()
 			return
 		}
