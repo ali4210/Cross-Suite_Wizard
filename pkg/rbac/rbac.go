@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -19,8 +20,28 @@ import (
 	"golang.org/x/term"
 )
 
-var localSudoPassword string
+// F-06: the elevation password is cached per (remote host, authenticated SSH user)
+// rather than in a single global, so a target switch can never reuse credentials
+// that were only ever validated against a different host. sudoCacheKey derives the
+// map key; lastSudoHostKey (set in ShowRBACMenu) detects a switch and drops every
+// entry for a host that is no longer the active target, so a stale password never
+// lingers in memory either.
+var sudoPasswordCache = map[string]string{}
+var lastSudoHostKey string
 var currentHostAlias string
+
+func sudoCacheKey(client *ssh.Client) string {
+	return client.RemoteAddr().String() + "|" + client.User()
+}
+
+// auditLog records an access-control mutation to the operator's local audit log
+// (see common.AuditLog). detail must never contain a password, key material, or
+// any other secret — only non-secret identifiers like usernames, policy names and
+// IP/CIDR values. result should be one of "applied", "failed", "rolled_back" or
+// "cancelled". See F-10.
+func auditLog(action, detail, result string) {
+	common.AuditLog(currentHostAlias, action, detail, result)
+}
 
 const rbacTierRegistry = "/etc/cross_rbac_tiers.txt"
 
@@ -161,7 +182,7 @@ func managePortAccessControl(reader *bufio.Reader, client *ssh.Client) {
 				fmt.Println(common.Green + "  No Windows Firewall rules found for this user." + common.Reset)
 			}
 		} else if sig.OS == "darwin" {
-			pfRulesOut, _ := common.ExecuteRemoteCommand(client, wrapSudo("pfctl -a cross_access -sr 2>/dev/null"), common.DefaultCmdTimeout)
+			pfRulesOut, _ := common.ExecuteRemoteCommand(client, wrapSudo(client, "pfctl -a cross_access -sr 2>/dev/null"), common.DefaultCmdTimeout)
 			if strings.TrimSpace(pfRulesOut) != "" {
 				fmt.Println(common.Yellow + pfRulesOut + common.Reset)
 			} else {
@@ -186,7 +207,7 @@ if not found:
     print('EMPTY')
 "
 `, username)
-			rulesOut, _ := common.ExecuteRemoteCommand(client, wrapSudo(rulesCmd), common.DefaultCmdTimeout)
+			rulesOut, _ := common.ExecuteRemoteCommand(client, wrapSudo(client, rulesCmd), common.DefaultCmdTimeout)
 			if rulesOut != "" && !strings.Contains(rulesOut, "EMPTY") {
 				lines := strings.Split(strings.TrimSpace(rulesOut), "\n")
 				for _, l := range lines {
@@ -354,7 +375,7 @@ func getUserAllowedPorts(client *ssh.Client, username, uid string) []string {
 	}
 
 	if sig.OS == "darwin" {
-		out, _ := common.ExecuteRemoteCommand(client, wrapSudo("pfctl -a cross_access -sr 2>/dev/null"), common.DefaultCmdTimeout)
+		out, _ := common.ExecuteRemoteCommand(client, wrapSudo(client, "pfctl -a cross_access -sr 2>/dev/null"), common.DefaultCmdTimeout)
 		var ports []string
 		for _, l := range strings.Split(out, "\n") {
 			if strings.Contains(l, "port") {
@@ -386,7 +407,7 @@ for line in proc.stdout.splitlines():
 print(','.join(ports))
 "
 `, uid)
-	out, _ := common.ExecuteRemoteCommand(client, wrapSudo(cmd), common.DefaultCmdTimeout)
+	out, _ := common.ExecuteRemoteCommand(client, wrapSudo(client, cmd), common.DefaultCmdTimeout)
 	if out == "" {
 		return []string{}
 	}
@@ -580,7 +601,7 @@ print('ALL_REMOVED')
 		"remove-all":     fmt.Sprintf("[✔] ALL port rules removed for user %s.", username),
 	}
 
-	out, err := common.ExecuteRemoteCommand(client, wrapSudo(script), common.DefaultCmdTimeout)
+	out, err := common.ExecuteRemoteCommand(client, wrapSudo(client, script), common.DefaultCmdTimeout)
 	marker := successMarker[action]
 	if err == nil && marker != "" && strings.Contains(out, marker) {
 		fmt.Println(common.Green + successMsg[action] + common.Reset)
@@ -595,7 +616,7 @@ print('ALL_REMOVED')
 // ====================================================================
 
 func ensureElevation(client *ssh.Client) bool {
-	if localSudoPassword != "" {
+	if sudoPasswordCache[sudoCacheKey(client)] != "" {
 		return true
 	}
 	return promptAndValidateSudo(client)
@@ -620,7 +641,7 @@ func promptAndValidateSudo(client *ssh.Client) bool {
 
 		sig := fetchHostSignature(client)
 		if sig.OS == "windows" {
-			localSudoPassword = pass
+			sudoPasswordCache[sudoCacheKey(client)] = pass
 			return true
 		}
 
@@ -650,7 +671,7 @@ sys.exit(1)
 		outValidate, errValidate := common.ExecuteRemoteCommand(client, validateCmd, common.DefaultCmdTimeout)
 
 		if errValidate == nil && strings.Contains(outValidate, "AUTH_OK") {
-			localSudoPassword = pass
+			sudoPasswordCache[sudoCacheKey(client)] = pass
 			fmt.Println(common.Green + "=> Elevation credentials verified successfully!" + common.Reset)
 			return true
 		}
@@ -659,7 +680,7 @@ sys.exit(1)
 		macSudoCheck := fmt.Sprintf("printf '%%s\\n' '%s' | sudo -S -k true 2>/dev/null && echo 'AUTH_OK'", escaped)
 		outMac, errMac := common.ExecuteRemoteCommand(client, macSudoCheck, common.DefaultCmdTimeout)
 		if errMac == nil && strings.Contains(outMac, "AUTH_OK") {
-			localSudoPassword = pass
+			sudoPasswordCache[sudoCacheKey(client)] = pass
 			fmt.Println(common.Green + "=> Elevation credentials verified successfully (POSIX Sudo)!" + common.Reset)
 			return true
 		}
@@ -672,11 +693,15 @@ sys.exit(1)
 	return false
 }
 
-func wrapSudo(cmd string) string {
-	if localSudoPassword == "" {
+// wrapSudo looks up the elevation password cached for this specific client's host
+// (see F-06) rather than any single global, so it can never apply a password that
+// was only ever validated against a different target.
+func wrapSudo(client *ssh.Client, cmd string) string {
+	pass := sudoPasswordCache[sudoCacheKey(client)]
+	if pass == "" {
 		return cmd
 	}
-	escapedPass := strings.ReplaceAll(localSudoPassword, "'", "'\"'\"'")
+	escapedPass := strings.ReplaceAll(pass, "'", "'\"'\"'")
 	b64Payload := base64.StdEncoding.EncodeToString([]byte(cmd))
 	return fmt.Sprintf("printf '%%s\\n' '%s' | sudo -S bash -c 'echo \"%s\" | base64 -d | bash'", escapedPass, b64Payload)
 }
@@ -730,12 +755,13 @@ func executeWithStdin(client *ssh.Client, cmd string, stdinLines []string, timeo
 // the sudo password followed by each secretLine over the SSH session's live stdin pipe,
 // never as part of the command text. See F-01.
 func runPrivilegedWithSecretStdin(client *ssh.Client, remoteCmd string, secretLines []string, timeout time.Duration) (string, error) {
-	if localSudoPassword == "" {
+	pass := sudoPasswordCache[sudoCacheKey(client)]
+	if pass == "" {
 		return "", fmt.Errorf("no elevation credentials available")
 	}
 	escapedInner := strings.ReplaceAll(remoteCmd, "'", `'"'"'`)
 	wrapped := fmt.Sprintf("sudo -k -S bash -c '%s'", escapedInner)
-	return executeWithStdin(client, wrapped, append([]string{localSudoPassword}, secretLines...), timeout)
+	return executeWithStdin(client, wrapped, append([]string{pass}, secretLines...), timeout)
 }
 
 // setLinuxPasswordViaChpasswd sets a POSIX account's password using `chpasswd`, which
@@ -845,7 +871,7 @@ func fetchSystemUsers(client *ssh.Client) []UserSummary {
 
 	if sig.OS == "darwin" {
 		dsclCmd := `dscl . -list /Users UniqueID | awk '$2 >= 500 {print $1 "|" $2 "|Unassigned|Dhaka, BD|/bin/zsh|ACTIVE|Standard User|SYSTEM"}'`
-		out, _ := common.ExecuteRemoteCommand(client, wrapSudo(dsclCmd), common.DefaultCmdTimeout)
+		out, _ := common.ExecuteRemoteCommand(client, wrapSudo(client, dsclCmd), common.DefaultCmdTimeout)
 		for _, l := range strings.Split(strings.TrimSpace(out), "\n") {
 			parts := strings.Split(strings.TrimSpace(l), "|")
 			if len(parts) >= 8 {
@@ -1062,7 +1088,7 @@ for p in pwd.getpwall():
 	b64Py := base64.StdEncoding.EncodeToString([]byte(scriptPython))
 	execCmd := fmt.Sprintf("python3 -c \"import base64; exec(base64.b64decode('%s').decode('utf-8'))\"", b64Py)
 
-	out, err := common.ExecuteRemoteCommand(client, wrapSudo(execCmd), common.DefaultCmdTimeout)
+	out, err := common.ExecuteRemoteCommand(client, wrapSudo(client, execCmd), common.DefaultCmdTimeout)
 
 	if err != nil || strings.TrimSpace(out) == "" {
 		hostIPCmd := "ip -o -4 addr show | awk '!/lo/ {print $4; exit}' | cut -d/ -f1"
@@ -1103,7 +1129,7 @@ BEGIN {
     print $1 "|" $3 "|" u_ip "|Dhaka, BD|" shell "|" st "|" tier "|SYSTEM"
 }' /etc/passwd
 `, hip, rbacTierRegistry)
-		out, _ = common.ExecuteRemoteCommand(client, wrapSudo(fallbackCmd), common.DefaultCmdTimeout)
+		out, _ = common.ExecuteRemoteCommand(client, wrapSudo(client, fallbackCmd), common.DefaultCmdTimeout)
 	}
 
 	for _, l := range strings.Split(strings.TrimSpace(out), "\n") {
@@ -1273,6 +1299,17 @@ func fetchActiveNetworkInterfaces(client *ssh.Client) []NetworkInterface {
 }
 
 func ShowRBACMenu(reader *bufio.Reader, client *ssh.Client, host string) {
+	// F-06: if the target changed since we were last here, drop every cached
+	// elevation password for the previous host rather than letting it linger in
+	// memory unused. This is a hygiene measure; sudoCacheKey already guarantees a
+	// different host's cached password can never be looked up for this one even
+	// without this step.
+	key := sudoCacheKey(client)
+	if lastSudoHostKey != "" && lastSudoHostKey != key {
+		sudoPasswordCache = make(map[string]string)
+	}
+	lastSudoHostKey = key
+
 	if !ensureElevation(client) {
 		fmt.Println(common.Red + "[!] Authentication failed. Access to Access Control Assigner denied." + common.Reset)
 		common.PausePrompt()
@@ -1497,8 +1534,10 @@ func provisionNewIdentity(reader *bufio.Reader, client *ssh.Client) {
 		_, err := executeWithStdin(client, winCmd, []string{password}, common.DefaultCmdTimeout)
 		if err != nil {
 			fmt.Printf(common.Red+"[!] Windows provisioning error: %v\n"+common.Reset, err)
+			auditLog("provision_identity", "user="+username+" os=windows", "failed")
 		} else {
 			fmt.Println(common.Green + "✅ Identity successfully created for Windows user [" + username + "]!" + common.Reset)
+			auditLog("provision_identity", "user="+username+" os=windows", "applied")
 		}
 		common.PausePrompt()
 		return
@@ -1517,8 +1556,10 @@ func provisionNewIdentity(reader *bufio.Reader, client *ssh.Client) {
 		_, err := runPrivilegedWithSecretStdin(client, macCmd, []string{password}, common.DefaultCmdTimeout)
 		if err != nil {
 			fmt.Printf(common.Red+"[!] macOS provisioning error: %v\n"+common.Reset, err)
+			auditLog("provision_identity", "user="+username+" os=darwin", "failed")
 		} else {
 			fmt.Println(common.Green + "✅ Identity successfully created for macOS user [" + username + "]!" + common.Reset)
+			auditLog("provision_identity", "user="+username+" os=darwin", "applied")
 		}
 		common.PausePrompt()
 		return
@@ -1692,9 +1733,10 @@ print('PROVISION_SUCCESS')
 	b64Python := base64.StdEncoding.EncodeToString([]byte(pythonScript))
 	remoteCmd := fmt.Sprintf("python3 -c \"import base64; exec(base64.b64decode('%s').decode('utf-8'))\"", b64Python)
 
-	out, err := common.ExecuteRemoteCommand(client, wrapSudo(remoteCmd), common.DefaultCmdTimeout)
+	out, err := common.ExecuteRemoteCommand(client, wrapSudo(client, remoteCmd), common.DefaultCmdTimeout)
 	if err != nil || !strings.Contains(out, "PROVISION_SUCCESS") {
 		fmt.Printf(common.Red+"[!] Provisioning error: %v\nOutput: %s\n"+common.Reset, err, out)
+		auditLog("provision_identity", "user="+username+" os=linux stage=account_create", "failed")
 		common.PausePrompt()
 		return
 	}
@@ -1704,10 +1746,12 @@ print('PROVISION_SUCCESS')
 	if pwErr := setLinuxPasswordViaChpasswd(client, username, password, common.DefaultCmdTimeout); pwErr != nil {
 		fmt.Printf(common.Red+"[!] Identity [%s] was created but setting its password failed: %v\n"+common.Reset, username, pwErr)
 		fmt.Println(common.Yellow + "=> The account exists with no usable password. Re-run password assignment or use SSH key login." + common.Reset)
+		auditLog("provision_identity", "user="+username+" os=linux stage=set_password", "failed")
 		common.PausePrompt()
 		return
 	}
 
+	auditLog("provision_identity", "user="+username+" os=linux force_expire="+forceExpire, "applied")
 	fmt.Println(common.Green + "✅ Identity successfully created for user [" + username + "]!" + common.Reset)
 
 	if dedicatedIP != "" {
@@ -1716,7 +1760,7 @@ print('PROVISION_SUCCESS')
 
 	if autoGenerateDedicatedKey {
 		fetchPrivCmd := fmt.Sprintf("cat /home/%s/.ssh/id_ed25519", username)
-		privKeyData, privErr := common.ExecuteRemoteCommand(client, wrapSudo(fetchPrivCmd), common.DefaultCmdTimeout)
+		privKeyData, privErr := common.ExecuteRemoteCommand(client, wrapSudo(client, fetchPrivCmd), common.DefaultCmdTimeout)
 		if privErr == nil && strings.Contains(privKeyData, "PRIVATE KEY") {
 			home, _ := os.UserHomeDir()
 			localKeyFile := filepath.Join(home, ".ssh", fmt.Sprintf("%s_id_ed25519", username))
@@ -1733,6 +1777,40 @@ print('PROVISION_SUCCESS')
 // -----------------------------------------------------------------------------
 // [2] RBAC Privilege Tiering
 // -----------------------------------------------------------------------------
+
+// sudoersPathEntryRe matches one strictly-safe sudoers command entry: an absolute
+// path followed by zero or more simple whitespace-separated tokens built only from
+// letters, digits, '.', '_', '-', '/' and '*' (the wildcard sudoers itself uses in
+// presets like "/usr/bin/systemctl * mysql"). No quotes, backticks, `$`, `;`, `&`,
+// `|`, redirection, backslashes or newlines can ever match this. See F-07.
+var sudoersPathEntryRe = regexp.MustCompile(`^/[A-Za-z0-9_./*-]+(?: [A-Za-z0-9_./*-]+)*$`)
+
+// validateCustomSudoersPaths parses a Tier-5 operator-typed comma-separated list of
+// binary paths and rejects the whole input if any entry isn't a strictly-safe
+// sudoers command entry. See F-07: this is the only place in the module that puts
+// free-text straight into a sudoers file and a shell command, so it gets a strict
+// allowlist rather than a blocklist.
+func validateCustomSudoersPaths(raw string) ([]string, error) {
+	parts := strings.Split(raw, ",")
+	var cleaned []string
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if len(p) > 256 {
+			return nil, fmt.Errorf("entry too long (max 256 chars): %q", p)
+		}
+		if !sudoersPathEntryRe.MatchString(p) {
+			return nil, fmt.Errorf("rejected unsafe entry %q — only an absolute path optionally followed by simple space-separated tokens of letters, digits, '.', '_', '-', '/' or '*' is allowed", p)
+		}
+		cleaned = append(cleaned, p)
+	}
+	if len(cleaned) == 0 {
+		return nil, fmt.Errorf("no valid path entries provided")
+	}
+	return cleaned, nil
+}
 func manageUserRBACTiers(reader *bufio.Reader, client *ssh.Client) {
 	fmt.Print("\033[H\033[2J")
 	fmt.Println(common.Cyan + common.Bold + "=== ROLE-BASED ACCESS CONTROL (RBAC) PRIVILEGE TIERING ===" + common.Reset)
@@ -1766,10 +1844,12 @@ func manageUserRBACTiers(reader *bufio.Reader, client *ssh.Client) {
 			winAdd := fmt.Sprintf(`powershell -Command "Add-LocalGroupMember -Group 'Administrators' -Member '%s'"`, username)
 			common.ExecuteRemoteCommand(client, winAdd, common.DefaultCmdTimeout)
 			fmt.Printf(common.Green+"✅ Success: User [%s] elevated to Windows Administrators Group!\n"+common.Reset, username)
+			auditLog("rbac_tier_change", "user="+username+" os=windows tier=Super-Admin", "applied")
 		} else if tierChoice == "6" {
 			winRem := fmt.Sprintf(`powershell -Command "Remove-LocalGroupMember -Group 'Administrators' -Member '%s'"`, username)
 			common.ExecuteRemoteCommand(client, winRem, common.DefaultCmdTimeout)
 			fmt.Printf(common.Green+"✅ All elevated privileges revoked for user [%s]!\n"+common.Reset, username)
+			auditLog("rbac_tier_change", "user="+username+" os=windows tier=revoke", "applied")
 		} else {
 			fmt.Println(common.Yellow + "[!] Granular sudoers whitelisting is tailored for POSIX. User remains in standard group." + common.Reset)
 		}
@@ -1780,12 +1860,14 @@ func manageUserRBACTiers(reader *bufio.Reader, client *ssh.Client) {
 	if sig.OS == "darwin" {
 		if tierChoice == "1" {
 			macAdd := fmt.Sprintf("dseditgroup -o edit -a %s -t user admin", username)
-			common.ExecuteRemoteCommand(client, wrapSudo(macAdd), common.DefaultCmdTimeout)
+			common.ExecuteRemoteCommand(client, wrapSudo(client, macAdd), common.DefaultCmdTimeout)
 			fmt.Printf(common.Green+"✅ Success: User [%s] elevated to macOS Admin!\n"+common.Reset, username)
+			auditLog("rbac_tier_change", "user="+username+" os=darwin tier=Super-Admin", "applied")
 		} else if tierChoice == "6" {
 			macRem := fmt.Sprintf("dseditgroup -o edit -d %s -t user admin", username)
-			common.ExecuteRemoteCommand(client, wrapSudo(macRem), common.DefaultCmdTimeout)
+			common.ExecuteRemoteCommand(client, wrapSudo(client, macRem), common.DefaultCmdTimeout)
 			fmt.Printf(common.Green+"✅ Privileges revoked for user [%s] on macOS!\n"+common.Reset, username)
+			auditLog("rbac_tier_change", "user="+username+" os=darwin tier=revoke", "applied")
 		} else {
 			fmt.Println(common.Yellow + "[!] Custom whitelists for macOS are applied via standard sudoers." + common.Reset)
 		}
@@ -1818,11 +1900,21 @@ func manageUserRBACTiers(reader *bufio.Reader, client *ssh.Client) {
 			common.PausePrompt()
 			return
 		}
+		// F-07: reject the whole input if any entry isn't a strictly-safe sudoers
+		// command — this free-text list used to go straight into a sudoers line
+		// AND an unescaped shell command, so quotes/backticks/$()/newlines could
+		// break out of both.
+		cleanedPaths, pathErr := validateCustomSudoersPaths(paths)
+		if pathErr != nil {
+			fmt.Printf(common.Red+"[!] Rejected: %v\nNo changes were made.\n"+common.Reset, pathErr)
+			common.PausePrompt()
+			return
+		}
 		tierName = "Custom Whitelist"
-		sudoersContent = fmt.Sprintf("%s ALL=(ALL) %s", username, paths)
+		sudoersContent = fmt.Sprintf("%s ALL=(ALL) %s", username, strings.Join(cleanedPaths, ", "))
 	case "6":
 		revokeCmd := fmt.Sprintf("rm -f /etc/sudoers.d/cross_rbac_%s", username)
-		_, err := common.ExecuteRemoteCommand(client, wrapSudo(revokeCmd), common.DefaultCmdTimeout)
+		_, err := common.ExecuteRemoteCommand(client, wrapSudo(client, revokeCmd), common.DefaultCmdTimeout)
 
 		regCleanCmd := fmt.Sprintf(`python3 -c "
 import os
@@ -1833,12 +1925,14 @@ if os.path.exists(reg):
     with open(reg, 'w') as f:
         f.writelines(lines)
 "`, username, rbacTierRegistry)
-		common.ExecuteRemoteCommand(client, wrapSudo(regCleanCmd), common.DefaultCmdTimeout)
+		common.ExecuteRemoteCommand(client, wrapSudo(client, regCleanCmd), common.DefaultCmdTimeout)
 
 		if err == nil {
 			fmt.Println(common.Green + "✅ All elevated privileges revoked for user [" + username + "]!" + common.Reset)
+			auditLog("rbac_tier_change", "user="+username+" os=linux tier=revoke", "applied")
 		} else {
 			fmt.Printf(common.Red+"[!] Error revoking privileges: %v\n"+common.Reset, err)
+			auditLog("rbac_tier_change", "user="+username+" os=linux tier=revoke", "failed")
 		}
 		common.PausePrompt()
 		return
@@ -1848,14 +1942,24 @@ if os.path.exists(reg):
 		return
 	}
 
+	// F-07: sudoersContent is written via base64, never interpolated into a shell
+	// string, so no quote/backtick/$()/newline in it can ever be interpreted by the
+	// shell — only visudo -cf ever parses it, as sudoers syntax. The previous target
+	// file (if any) is snapshotted before being replaced, and nothing is overwritten
+	// unless visudo accepts the new content first.
+	b64SudoersContent := base64.StdEncoding.EncodeToString([]byte(sudoersContent + "\n"))
 	script := fmt.Sprintf(`
 TMP_FILE="/etc/sudoers.d/.tmp_rbac_%s"
 TARGET_FILE="/etc/sudoers.d/cross_rbac_%s"
+BACKUP_FILE="/etc/sudoers.d/.bak_rbac_%s"
 
-echo "%s" | tee "$TMP_FILE" >/dev/null
+echo "%s" | base64 -d > "$TMP_FILE"
 chmod 0440 "$TMP_FILE"
 
 if visudo -cf "$TMP_FILE" >/dev/null 2>&1; then
+    if [ -f "$TARGET_FILE" ]; then
+        cp -p "$TARGET_FILE" "$BACKUP_FILE"
+    fi
     mv "$TMP_FILE" "$TARGET_FILE"
     echo "VISUDO_SUCCESS"
 else
@@ -1863,10 +1967,10 @@ else
     echo "VISUDO_FAILED_SYNTAX_ERROR"
     exit 1
 fi
-`, username, username, sudoersContent)
+`, username, username, username, b64SudoersContent)
 
 	fmt.Println(common.Cyan + "[+] Validating and applying RBAC rule atomically..." + common.Reset)
-	out, err := common.ExecuteRemoteCommand(client, wrapSudo(script), common.DefaultCmdTimeout)
+	out, err := common.ExecuteRemoteCommand(client, wrapSudo(client, script), common.DefaultCmdTimeout)
 
 	if err == nil && strings.Contains(out, "VISUDO_SUCCESS") {
 		regWriteCmd := fmt.Sprintf(`python3 -c "
@@ -1884,11 +1988,13 @@ with open(reg, 'w') as f:
     os.fsync(f.fileno())
 os.chmod(reg, 0o644)
 "`, username, tierName, rbacTierRegistry)
-		common.ExecuteRemoteCommand(client, wrapSudo(regWriteCmd), common.DefaultCmdTimeout)
+		common.ExecuteRemoteCommand(client, wrapSudo(client, regWriteCmd), common.DefaultCmdTimeout)
 
 		fmt.Printf(common.Green+"✅ Success: User [%s] elevated to Tier [%s]!\n"+common.Reset, username, tierName)
+		auditLog("rbac_tier_change", "user="+username+" os=linux tier="+tierName, "applied")
 	} else {
 		fmt.Printf(common.Red+"[!] Security Fail-Safe Triggered: visudo rejected rule syntax. No changes were made.\nOutput: %s\n"+common.Reset, out)
+		auditLog("rbac_tier_change", "user="+username+" os=linux tier="+tierName, "failed")
 	}
 	common.PausePrompt()
 }
@@ -1969,6 +2075,7 @@ func assignIPAndVirtualInterface(reader *bufio.Reader, client *ssh.Client) {
 			psDel := `powershell -Command "Get-NetIPAddress | Where-Object {$_.InterfaceAlias -notmatch 'Loopback' -and $_.SkipAsSource -eq $true} | Remove-NetIPAddress -Confirm:$false"`
 			common.ExecuteRemoteCommand(client, psDel, common.DefaultCmdTimeout)
 			fmt.Printf(common.Green + "✅ Success: Stacked IP addresses purged on Windows host!\n" + common.Reset)
+			auditLog("ip_stack_purge", "user="+username+" os=windows", "applied")
 			common.PausePrompt()
 			return
 		}
@@ -1999,11 +2106,13 @@ print('PURGE_IP_OK')
 "
 `, username)
 
-		out, err := common.ExecuteRemoteCommand(client, wrapSudo(purgeScript), common.DefaultCmdTimeout)
+		out, err := common.ExecuteRemoteCommand(client, wrapSudo(client, purgeScript), common.DefaultCmdTimeout)
 		if err == nil && strings.Contains(out, "PURGE_IP_OK") {
 			fmt.Printf(common.Green+"✅ Success: Assigned IP address for user [%s] has been unbound and purged!\n"+common.Reset, username)
+			auditLog("ip_stack_purge", "user="+username+" os=linux", "applied")
 		} else {
 			fmt.Printf(common.Red+"[!] Error purging IP: %v\nOutput: %s\n"+common.Reset, err, out)
+			auditLog("ip_stack_purge", "user="+username+" os=linux", "failed")
 		}
 		common.PausePrompt()
 		return
@@ -2055,6 +2164,9 @@ print('PURGE_IP_OK')
 		_, errWin := common.ExecuteRemoteCommand(client, psAdd, common.DefaultCmdTimeout)
 		if errWin == nil {
 			fmt.Printf(common.Green+"✅ Success: Stacked IP [%s] assigned to Windows adapter [%s]!\n"+common.Reset, cleanIP, selectedIface)
+			auditLog("ip_stack_assign", "user="+username+" os=windows ip="+cleanIP+" iface="+selectedIface, "applied")
+		} else {
+			auditLog("ip_stack_assign", "user="+username+" os=windows ip="+cleanIP+" iface="+selectedIface, "failed")
 		}
 		common.PausePrompt()
 		return
@@ -2063,9 +2175,12 @@ print('PURGE_IP_OK')
 	if sig.OS == "darwin" {
 		cleanIP := strings.Split(assignIP, "/")[0]
 		macAdd := fmt.Sprintf("ifconfig %s alias %s netmask 255.255.255.0", selectedIface, cleanIP)
-		_, errMac := common.ExecuteRemoteCommand(client, wrapSudo(macAdd), common.DefaultCmdTimeout)
+		_, errMac := common.ExecuteRemoteCommand(client, wrapSudo(client, macAdd), common.DefaultCmdTimeout)
 		if errMac == nil {
 			fmt.Printf(common.Green+"✅ Success: Stacked IP [%s] aliased onto macOS [%s]!\n"+common.Reset, cleanIP, selectedIface)
+			auditLog("ip_stack_assign", "user="+username+" os=darwin ip="+cleanIP+" iface="+selectedIface, "applied")
+		} else {
+			auditLog("ip_stack_assign", "user="+username+" os=darwin ip="+cleanIP+" iface="+selectedIface, "failed")
 		}
 		common.PausePrompt()
 		return
@@ -2074,20 +2189,23 @@ print('PURGE_IP_OK')
 	script := buildIPStackScript(assignIP, selectedIface, username)
 
 	fmt.Println(common.Cyan + "[+] Stacking pingable IP onto adapter and updating registry..." + common.Reset)
-	out, err := common.ExecuteRemoteCommand(client, wrapSudo(script), common.DefaultCmdTimeout)
+	out, err := common.ExecuteRemoteCommand(client, wrapSudo(client, script), common.DefaultCmdTimeout)
 
 	if err == nil && strings.Contains(out, "IP_PROVISION_OK") {
 		if ttlSeconds > 0 {
 			ttlCmd := fmt.Sprintf("systemd-run --unit=cross_ip_%s --on-active=%ds sh -c 'ip addr del %s dev %s 2>/dev/null; python3 -c \"import os; lines=[l for l in open(\\\"/etc/cross_assigned_ips.txt\\\") if not l.startswith(\\\"%s:\\\")]; open(\\\"/etc/cross_assigned_ips.txt\\\", \\\"w\\\").writelines(lines)\"'",
 				username, ttlSeconds, assignIP, selectedIface, username)
-			_, _ = common.ExecuteRemoteCommand(client, wrapSudo(ttlCmd), common.DefaultCmdTimeout)
+			_, _ = common.ExecuteRemoteCommand(client, wrapSudo(client, ttlCmd), common.DefaultCmdTimeout)
 			fmt.Printf(common.Green+"✅ Success: Ephemeral Pingable IP [%s] stacked for user [%s] on [%s] (TTL: %d seconds)!\n"+common.Reset, assignIP, username, selectedIface, ttlSeconds)
+			auditLog("ip_stack_assign", fmt.Sprintf("user=%s os=linux ip=%s iface=%s ttl_seconds=%d", username, assignIP, selectedIface, ttlSeconds), "applied")
 		} else {
 			fmt.Printf(common.Green+"✅ Success: Permanent Pingable IP [%s] stacked cleanly for user [%s] on [%s]!\n"+common.Reset, assignIP, username, selectedIface)
+			auditLog("ip_stack_assign", "user="+username+" os=linux ip="+assignIP+" iface="+selectedIface, "applied")
 		}
 		fmt.Println(common.Yellow + "=> You can now ping this IP from any computer on the subnet." + common.Reset)
 	} else {
 		fmt.Printf(common.Red+"[!] Error assigning IP: %v\nOutput: %s\n"+common.Reset, err, out)
+		auditLog("ip_stack_assign", "user="+username+" os=linux ip="+assignIP+" iface="+selectedIface, "failed")
 	}
 	common.PausePrompt()
 }
@@ -2128,12 +2246,14 @@ func assignDNSResolverProfile(reader *bufio.Reader, client *ssh.Client) {
 		if sig.OS == "windows" {
 			common.ExecuteRemoteCommand(client, `powershell -Command "Set-DnsClientServerAddress -InterfaceAlias (Get-NetAdapter | Where-Object Status -eq 'Up').Name -ResetServerAddresses"`, common.DefaultCmdTimeout)
 			fmt.Println(common.Green + "✅ Windows DNS reset to DHCP default." + common.Reset)
+			auditLog("dns_revert", "user="+username+" os=windows", "applied")
 			common.PausePrompt()
 			return
 		}
 		if sig.OS == "darwin" {
-			common.ExecuteRemoteCommand(client, wrapSudo("networksetup -setdnsservers Wi-Fi empty 2>/dev/null; networksetup -setdnsservers Ethernet empty 2>/dev/null"), common.DefaultCmdTimeout)
+			common.ExecuteRemoteCommand(client, wrapSudo(client, "networksetup -setdnsservers Wi-Fi empty 2>/dev/null; networksetup -setdnsservers Ethernet empty 2>/dev/null"), common.DefaultCmdTimeout)
 			fmt.Println(common.Green + "✅ macOS DNS reset to DHCP default." + common.Reset)
+			auditLog("dns_revert", "user="+username+" os=darwin", "applied")
 			common.PausePrompt()
 			return
 		}
@@ -2148,11 +2268,13 @@ if systemctl is-active systemd-resolved >/dev/null 2>&1; then
 fi
 echo "DNS_REVERT_OK"
 `
-		out, err := common.ExecuteRemoteCommand(client, wrapSudo(revertScript), common.DefaultCmdTimeout)
+		out, err := common.ExecuteRemoteCommand(client, wrapSudo(client, revertScript), common.DefaultCmdTimeout)
 		if err == nil && strings.Contains(out, "DNS_REVERT_OK") {
 			fmt.Println(common.Green + "✅ Custom DNS purged! System reverted to default network upstream resolvers." + common.Reset)
+			auditLog("dns_revert", "user="+username+" os=linux", "applied")
 		} else {
 			fmt.Printf(common.Red+"[!] Error resetting DNS: %v\n"+common.Reset, err)
+			auditLog("dns_revert", "user="+username+" os=linux", "failed")
 		}
 		common.PausePrompt()
 		return
@@ -2197,14 +2319,16 @@ echo "DNS_REVERT_OK"
 		winDNS := fmt.Sprintf(`powershell -Command "Set-DnsClientServerAddress -InterfaceAlias (Get-NetAdapter | Where-Object Status -eq 'Up').Name -ServerAddresses ('%s','%s')"`, primaryDNS, secondaryDNS)
 		common.ExecuteRemoteCommand(client, winDNS, common.DefaultCmdTimeout)
 		fmt.Printf(common.Green+"✅ Success: DNS Policy [%s (%s, %s)] assigned on Windows!\n"+common.Reset, dnsName, primaryDNS, secondaryDNS)
+		auditLog("dns_assign", fmt.Sprintf("user=%s os=windows policy=%s primary=%s secondary=%s", username, dnsName, primaryDNS, secondaryDNS), "applied")
 		common.PausePrompt()
 		return
 	}
 
 	if sig.OS == "darwin" {
 		macDNS := fmt.Sprintf("networksetup -setdnsservers Wi-Fi %s %s 2>/dev/null || networksetup -setdnsservers Ethernet %s %s 2>/dev/null", primaryDNS, secondaryDNS, primaryDNS, secondaryDNS)
-		common.ExecuteRemoteCommand(client, wrapSudo(macDNS), common.DefaultCmdTimeout)
+		common.ExecuteRemoteCommand(client, wrapSudo(client, macDNS), common.DefaultCmdTimeout)
 		fmt.Printf(common.Green+"✅ Success: DNS Policy [%s (%s, %s)] assigned on macOS!\n"+common.Reset, dnsName, primaryDNS, secondaryDNS)
+		auditLog("dns_assign", fmt.Sprintf("user=%s os=darwin policy=%s primary=%s secondary=%s", username, dnsName, primaryDNS, secondaryDNS), "applied")
 		common.PausePrompt()
 		return
 	}
@@ -2226,12 +2350,14 @@ echo "DNS_UPDATE_SUCCESS"
 `, primaryDNS, secondaryDNS, primaryDNS, secondaryDNS)
 
 	fmt.Println(common.Cyan + "[+] Enforcing DNS upstream configuration on remote system..." + common.Reset)
-	out, err := common.ExecuteRemoteCommand(client, wrapSudo(script), common.DefaultCmdTimeout)
+	out, err := common.ExecuteRemoteCommand(client, wrapSudo(client, script), common.DefaultCmdTimeout)
 
 	if err == nil && strings.Contains(out, "DNS_UPDATE_SUCCESS") {
 		fmt.Printf(common.Green+"✅ Success: DNS Policy [%s (%s, %s)] assigned to user [%s]!\n"+common.Reset, dnsName, primaryDNS, secondaryDNS, username)
+		auditLog("dns_assign", fmt.Sprintf("user=%s os=linux policy=%s primary=%s secondary=%s", username, dnsName, primaryDNS, secondaryDNS), "applied")
 	} else {
 		fmt.Printf(common.Red+"[!] Error updating DNS: %v\nOutput: %s\n"+common.Reset, err, out)
+		auditLog("dns_assign", fmt.Sprintf("user=%s os=linux policy=%s primary=%s secondary=%s", username, dnsName, primaryDNS, secondaryDNS), "failed")
 	}
 	common.PausePrompt()
 }
@@ -2239,6 +2365,38 @@ echo "DNS_UPDATE_SUCCESS"
 // -----------------------------------------------------------------------------
 // [5] User Network & Internet Confinement
 // -----------------------------------------------------------------------------
+// confirmConfinementAction shows exactly what rule changes are about to be applied
+// and requires typed confirmation before any firewall rule is touched, matching the
+// Emergency Quarantine module's safety gate (typed phrase, not a bare y/N). If the
+// SSH session currently running this tool is itself authenticated as the targeted
+// user, it demands a second, more explicit typed phrase — applying LAN/WAN/total
+// confinement to your own connection can sever it immediately with no automatic
+// recovery. See F-05.
+func confirmConfinementAction(reader *bufio.Reader, client *ssh.Client, username, policyName, previewText string) bool {
+	fmt.Println(common.Yellow + "\n⚠️  PREVIEW — rule changes about to be applied for user [" + username + "]:" + common.Reset)
+	fmt.Println(previewText)
+
+	if strings.EqualFold(client.User(), username) {
+		fmt.Println(common.Red + common.Bold + "\n⚠️  DANGER: this SSH session is authenticated AS the user you just selected." + common.Reset)
+		fmt.Println(common.Red + "Applying [" + policyName + "] can sever your OWN connection immediately, with no automatic recovery." + common.Reset)
+		fmt.Print(common.Red + common.Bold + "Type 'LOCK MYSELF OUT' to proceed anyway, or press Enter to cancel: " + common.Reset)
+		confirm, _ := reader.ReadString('\n')
+		if strings.TrimSpace(confirm) != "LOCK MYSELF OUT" {
+			fmt.Println(common.Yellow + "[!] Cancelled. No changes were made." + common.Reset)
+			return false
+		}
+		return true
+	}
+
+	fmt.Print(common.Bold + "Type 'CONFIRM' to apply [" + policyName + "], or press Enter to cancel: " + common.Reset)
+	confirm, _ := reader.ReadString('\n')
+	if strings.TrimSpace(confirm) != "CONFIRM" {
+		fmt.Println(common.Yellow + "[!] Cancelled. No changes were made." + common.Reset)
+		return false
+	}
+	return true
+}
+
 func manageNetworkAndInternetConfinement(reader *bufio.Reader, client *ssh.Client) {
 	fmt.Print("\033[H\033[2J")
 	fmt.Println(common.Cyan + common.Bold + "=== USER NETWORK & INTERNET CONFINEMENT ENGINE ===" + common.Reset)
@@ -2278,6 +2436,12 @@ func manageNetworkAndInternetConfinement(reader *bufio.Reader, client *ssh.Clien
 	case "0":
 		return
 	case "1":
+		preview := "  • DROP outbound traffic from [" + username + "] to 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12 (local LAN subnets)\n  • WAN/internet access remains allowed"
+		if !confirmConfinementAction(reader, client, username, "Block Local LAN", preview) {
+			common.PausePrompt()
+			return
+		}
+
 		script := fmt.Sprintf(`
 python3 -c "
 import subprocess, pwd
@@ -2300,14 +2464,23 @@ print('LAN_BLOCKED_OK')
 "
 `, username)
 
-		out, err := common.ExecuteRemoteCommand(client, wrapSudo(script), common.DefaultCmdTimeout)
+		out, err := common.ExecuteRemoteCommand(client, wrapSudo(client, script), common.DefaultCmdTimeout)
 		if err == nil && strings.Contains(out, "LAN_BLOCKED_OK") {
 			fmt.Printf(common.Green+"✅ Success: Local LAN access is now blocked for user [%s]!\n"+common.Reset, username)
+			fmt.Println(common.Cyan + "=> To undo: return to this menu and choose [4] Granular Unblock & Restore Engine → [1] Unblock Local LAN Only." + common.Reset)
+			auditLog("confinement_apply", "user="+username+" policy=lan_block", "applied")
 		} else {
 			fmt.Printf(common.Red+"[!] Error applying LAN confinement: %v\n"+common.Reset, err)
+			auditLog("confinement_apply", "user="+username+" policy=lan_block", "failed")
 		}
 
 	case "2":
+		preview := "  • ACCEPT loopback + 192.168.0.0/16 + 10.0.0.0/8 + 172.16.0.0/12 for [" + username + "]\n  • DROP everything else outbound (all WAN/internet egress)"
+		if !confirmConfinementAction(reader, client, username, "Blackhole External Internet", preview) {
+			common.PausePrompt()
+			return
+		}
+
 		script := fmt.Sprintf(`
 python3 -c "
 import subprocess, pwd
@@ -2332,14 +2505,23 @@ print('WAN_BLOCKED_OK')
 "
 `, username)
 
-		out, err := common.ExecuteRemoteCommand(client, wrapSudo(script), common.DefaultCmdTimeout)
+		out, err := common.ExecuteRemoteCommand(client, wrapSudo(client, script), common.DefaultCmdTimeout)
 		if err == nil && strings.Contains(out, "WAN_BLOCKED_OK") {
 			fmt.Printf(common.Green+"✅ Success: External internet access is now blackholed for user [%s]!\n"+common.Reset, username)
+			fmt.Println(common.Cyan + "=> To undo: return to this menu and choose [4] Granular Unblock & Restore Engine → [2] Unblock External Internet Only." + common.Reset)
+			auditLog("confinement_apply", "user="+username+" policy=wan_blackhole", "applied")
 		} else {
 			fmt.Printf(common.Red+"[!] Error applying WAN blackhole: %v\n"+common.Reset, err)
+			auditLog("confinement_apply", "user="+username+" policy=wan_blackhole", "failed")
 		}
 
 	case "3":
+		preview := "  • ACCEPT only loopback (127.0.0.0/8 via lo) for [" + username + "]\n  • DROP everything else outbound — ZERO LAN, ZERO WAN, true airgap"
+		if !confirmConfinementAction(reader, client, username, "Complete Network Blackhole", preview) {
+			common.PausePrompt()
+			return
+		}
+
 		script := fmt.Sprintf(`
 python3 -c "
 import subprocess, pwd
@@ -2361,11 +2543,14 @@ print('TOTAL_BLACKHOLE_OK')
 "
 `, username)
 
-		out, err := common.ExecuteRemoteCommand(client, wrapSudo(script), common.DefaultCmdTimeout)
+		out, err := common.ExecuteRemoteCommand(client, wrapSudo(client, script), common.DefaultCmdTimeout)
 		if err == nil && strings.Contains(out, "TOTAL_BLACKHOLE_OK") {
 			fmt.Printf(common.Green+"✅ Success: TRUE AIRGAP BLACKHOLE ENFORCED for user [%s]! (Zero LAN, Zero Host IP, Zero Internet, 127.0.0.1 Only)\n"+common.Reset, username)
+			fmt.Println(common.Cyan + "=> To undo: return to this menu and choose [4] Granular Unblock & Restore Engine → [3] Lift Complete Network Blackhole." + common.Reset)
+			auditLog("confinement_apply", "user="+username+" policy=total_blackhole", "applied")
 		} else {
 			fmt.Printf(common.Red+"[!] Error applying blackhole: %v\n"+common.Reset, err)
+			auditLog("confinement_apply", "user="+username+" policy=total_blackhole", "failed")
 		}
 
 	case "4":
@@ -2423,11 +2608,13 @@ print('RESTORE_NET_OK')
 "
 `, username, targetTag)
 
-		out, err := common.ExecuteRemoteCommand(client, wrapSudo(unblockScript), common.DefaultCmdTimeout)
+		out, err := common.ExecuteRemoteCommand(client, wrapSudo(client, unblockScript), common.DefaultCmdTimeout)
 		if err == nil && strings.Contains(out, "RESTORE_NET_OK") {
 			fmt.Printf(common.Green+"✅ Success: Selected network confinement rules cleanly unblocked for user [%s]!\n"+common.Reset, username)
+			auditLog("confinement_unblock", "user="+username+" tag="+targetTag, "rolled_back")
 		} else {
 			fmt.Printf(common.Red+"[!] Error unblocking: %v\nOutput: %s\n"+common.Reset, err, out)
+			auditLog("confinement_unblock", "user="+username+" tag="+targetTag, "failed")
 		}
 	}
 	common.PausePrompt()
@@ -2491,22 +2678,24 @@ func orchestrateHostNetwork(reader *bufio.Reader, client *ssh.Client) {
 			common.ExecuteRemoteCommand(client, fmt.Sprintf(`powershell -Command "Set-DnsClientServerAddress -InterfaceAlias '%s' -ServerAddresses ('%s')"`, selectedIface, newDNS), common.DefaultCmdTimeout)
 		}
 		fmt.Println(common.Green + "✅ Host Network Parameters applied on Windows!" + common.Reset)
+		auditLog("host_network_orchestrate", fmt.Sprintf("os=windows iface=%s ip=%s hostname=%s", selectedIface, newIP, newHostname), "applied")
 		common.PausePrompt()
 		return
 	}
 
 	if sig.OS == "darwin" {
 		if newHostname != "" {
-			common.ExecuteRemoteCommand(client, wrapSudo(fmt.Sprintf("scutil --set HostName '%s'", newHostname)), common.DefaultCmdTimeout)
+			common.ExecuteRemoteCommand(client, wrapSudo(client, fmt.Sprintf("scutil --set HostName '%s'", newHostname)), common.DefaultCmdTimeout)
 		}
 		if newIP != "" {
 			cleanIP := strings.Split(newIP, "/")[0]
-			common.ExecuteRemoteCommand(client, wrapSudo(fmt.Sprintf("ifconfig %s alias %s netmask 255.255.255.0", selectedIface, cleanIP)), common.DefaultCmdTimeout)
+			common.ExecuteRemoteCommand(client, wrapSudo(client, fmt.Sprintf("ifconfig %s alias %s netmask 255.255.255.0", selectedIface, cleanIP)), common.DefaultCmdTimeout)
 		}
 		if newDNS != "" {
-			common.ExecuteRemoteCommand(client, wrapSudo(fmt.Sprintf("networksetup -setdnsservers Ethernet %s 2>/dev/null || networksetup -setdnsservers Wi-Fi %s", newDNS, newDNS)), common.DefaultCmdTimeout)
+			common.ExecuteRemoteCommand(client, wrapSudo(client, fmt.Sprintf("networksetup -setdnsservers Ethernet %s 2>/dev/null || networksetup -setdnsservers Wi-Fi %s", newDNS, newDNS)), common.DefaultCmdTimeout)
 		}
 		fmt.Println(common.Green + "✅ Host Network Parameters applied on macOS!" + common.Reset)
+		auditLog("host_network_orchestrate", fmt.Sprintf("os=darwin iface=%s ip=%s hostname=%s", selectedIface, newIP, newHostname), "applied")
 		common.PausePrompt()
 		return
 	}
@@ -2540,7 +2729,7 @@ EOF
 	script += "echo 'NET_ORCHESTRATE_SUCCESS'\n"
 
 	fmt.Println(common.Cyan + "[+] Applying network configuration changes..." + common.Reset)
-	out, err := common.ExecuteRemoteCommand(client, wrapSudo(script), common.DefaultCmdTimeout)
+	out, err := common.ExecuteRemoteCommand(client, wrapSudo(client, script), common.DefaultCmdTimeout)
 
 	if err == nil && strings.Contains(out, "NET_ORCHESTRATE_SUCCESS") {
 		fmt.Println(common.Green + "✅ Host Network Parameters successfully updated and applied!" + common.Reset)
@@ -2550,8 +2739,10 @@ EOF
 		if newIP != "" {
 			fmt.Printf("=> Interface %s assigned: %s\n", selectedIface, newIP)
 		}
+		auditLog("host_network_orchestrate", fmt.Sprintf("os=linux iface=%s ip=%s gateway=%s hostname=%s", selectedIface, newIP, newGW, newHostname), "applied")
 	} else {
 		fmt.Printf(common.Red+"[!] Error orchestrating network: %v\nOutput: %s\n"+common.Reset, err, out)
+		auditLog("host_network_orchestrate", fmt.Sprintf("os=linux iface=%s ip=%s gateway=%s hostname=%s", selectedIface, newIP, newGW, newHostname), "failed")
 	}
 	common.PausePrompt()
 }
@@ -2612,6 +2803,7 @@ func monitorAndKillSessions(reader *bufio.Reader, client *ssh.Client) {
 			if sig.OS == "windows" {
 				common.ExecuteRemoteCommand(client, `powershell -Command "quser | ForEach-Object { $id = ($_ -split '\s+')[2]; if($id -match '^\d+$'){ logoff $id } }"`, common.DefaultCmdTimeout)
 				fmt.Println(common.Green + "✅ All active user terminal sessions have been terminated on Windows!" + common.Reset)
+				auditLog("session_kill_all", "os=windows", "applied")
 			} else {
 				killAllScript := `
 python3 -c "
@@ -2623,11 +2815,16 @@ for p in pwd.getpwall():
 print('KILLALL_OK')
 "
 `
-				outKill, _ := common.ExecuteRemoteCommand(client, wrapSudo(killAllScript), common.DefaultCmdTimeout)
+				outKill, _ := common.ExecuteRemoteCommand(client, wrapSudo(client, killAllScript), common.DefaultCmdTimeout)
 				if strings.Contains(outKill, "KILLALL_OK") {
 					fmt.Println(common.Green + "✅ All active non-root user terminal sessions have been terminated!" + common.Reset)
+					auditLog("session_kill_all", "os=linux", "applied")
+				} else {
+					auditLog("session_kill_all", "os=linux", "failed")
 				}
 			}
+		} else {
+			auditLog("session_kill_all", "", "cancelled")
 		}
 		common.PausePrompt()
 		return
@@ -2648,20 +2845,23 @@ print('KILLALL_OK')
 			common.ExecuteRemoteCommand(client, winKill, common.DefaultCmdTimeout)
 		} else {
 			killCmd := fmt.Sprintf("pkill -9 -u %s", targetUser)
-			common.ExecuteRemoteCommand(client, wrapSudo(killCmd), common.DefaultCmdTimeout)
+			common.ExecuteRemoteCommand(client, wrapSudo(client, killCmd), common.DefaultCmdTimeout)
 		}
 		fmt.Println(common.Green + "✅ Active sessions terminated for user [" + targetUser + "]!" + common.Reset)
+		auditLog("session_kill", "user="+targetUser+" os="+sig.OS, "applied")
 	case 1:
 		if sig.OS == "windows" {
 			winLock := fmt.Sprintf(`powershell -Command "quser | Select-String '%s' | ForEach-Object { $id = ($_ -split '\s+')[2]; if($id -match '^\d+$'){ logoff $id } }; Disable-LocalUser -Name '%s'"`, targetUser, targetUser)
 			common.ExecuteRemoteCommand(client, winLock, common.DefaultCmdTimeout)
 		} else {
 			killLockCmd := fmt.Sprintf("pkill -9 -u %s; passwd -l %s 2>/dev/null || pw lock %s", targetUser, targetUser, targetUser)
-			common.ExecuteRemoteCommand(client, wrapSudo(killLockCmd), common.DefaultCmdTimeout)
+			common.ExecuteRemoteCommand(client, wrapSudo(client, killLockCmd), common.DefaultCmdTimeout)
 		}
 		fmt.Println(common.Green + "✅ Sessions terminated and account [" + targetUser + "] locked!" + common.Reset)
+		auditLog("session_kill_and_lock", "user="+targetUser+" os="+sig.OS, "applied")
 	default:
 		fmt.Println(common.Yellow + "[!] No action taken." + common.Reset)
+		auditLog("session_kill", "user="+targetUser+" os="+sig.OS, "cancelled")
 	}
 	common.PausePrompt()
 }
@@ -2782,7 +2982,7 @@ print('\n=== DRY RUN VERDICT: SIMULATION COMPLETED SAFELY (ZERO CHANGES APPLIED)
 "
 `
 		fmt.Println(common.Cyan + "\n[+] Running pre-flight Mass Purge simulation..." + common.Reset)
-		out, err := common.ExecuteRemoteCommand(client, wrapSudo(dryRunPythonScript), common.DefaultCmdTimeout)
+		out, err := common.ExecuteRemoteCommand(client, wrapSudo(client, dryRunPythonScript), common.DefaultCmdTimeout)
 		if err == nil {
 			fmt.Println(common.Green + out + common.Reset)
 		} else {
@@ -2807,6 +3007,7 @@ print('\n=== DRY RUN VERDICT: SIMULATION COMPLETED SAFELY (ZERO CHANGES APPLIED)
 		confirm, _ := reader.ReadString('\n')
 		if strings.TrimSpace(confirm) != "NUKE" {
 			fmt.Println(common.Yellow + "[!] Nuclear purge aborted. No changes made." + common.Reset)
+			auditLog("mass_purge", "", "cancelled")
 			common.PausePrompt()
 			return
 		}
@@ -2815,6 +3016,7 @@ print('\n=== DRY RUN VERDICT: SIMULATION COMPLETED SAFELY (ZERO CHANGES APPLIED)
 			winNuke := `powershell -Command "Get-LocalUser | Where-Object { $_.Name -notin @('Administrator','DefaultAccount','Guest','WDAGUtilityAccount') } | Remove-LocalUser -Confirm:$false"`
 			common.ExecuteRemoteCommand(client, winNuke, common.DefaultCmdTimeout)
 			fmt.Println(common.Green + "✅ Windows System Sanitization Complete!" + common.Reset)
+			auditLog("mass_purge", "os=windows", "applied")
 			common.PausePrompt()
 			return
 		}
@@ -2872,15 +3074,17 @@ print(f'NUCLEAR_PURGE_SUCCESS|Purged {len(to_purge)} users.')
 "
 `, rbacTierRegistry, rbacTierRegistry)
 		fmt.Println(common.Cyan + "\n[+] Executing full-spectrum system sanitization..." + common.Reset)
-		out, err := common.ExecuteRemoteCommand(client, wrapSudo(nuclearPythonScript), common.DefaultCmdTimeout)
+		out, err := common.ExecuteRemoteCommand(client, wrapSudo(client, nuclearPythonScript), common.DefaultCmdTimeout)
 
 		if err == nil && strings.Contains(out, "NUCLEAR_PURGE_SUCCESS") {
 			fmt.Println(common.Green + common.Bold + "\n✅ SYSTEM SANITIZATION COMPLETE:" + common.Reset)
 			fmt.Println("  • All created identities, home directories, stacked IPs, and firewall rules purged.")
 			fmt.Println("  • RBAC tier registry cleared.")
 			fmt.Println("  • Root and Native OS Admin accounts remain active and untouched.")
+			auditLog("mass_purge", "os=linux", "applied")
 		} else {
 			fmt.Printf(common.Red+"[!] Error during nuclear purge: %v\nOutput: %s\n"+common.Reset, err, out)
+			auditLog("mass_purge", "os=linux", "failed")
 		}
 		common.PausePrompt()
 		return
@@ -2898,24 +3102,26 @@ print(f'NUCLEAR_PURGE_SUCCESS|Purged {len(to_purge)} users.')
 		if sig.OS == "windows" {
 			common.ExecuteRemoteCommand(client, fmt.Sprintf(`powershell -Command "Disable-LocalUser -Name '%s'"`, username), common.DefaultCmdTimeout)
 		} else if sig.OS == "darwin" {
-			common.ExecuteRemoteCommand(client, wrapSudo(fmt.Sprintf("dscl . -create /Users/%s AuthenticationAuthority ';DisabledUser;'", username)), common.DefaultCmdTimeout)
+			common.ExecuteRemoteCommand(client, wrapSudo(client, fmt.Sprintf("dscl . -create /Users/%s AuthenticationAuthority ';DisabledUser;'", username)), common.DefaultCmdTimeout)
 		} else {
 			cmd := fmt.Sprintf("passwd -l %s && pkill -9 -u %s && rm -f /etc/sudoers.d/cross_rbac_%s /etc/ssh/sshd_config.d/rbac_%s.conf && systemctl reload sshd",
 				username, username, username, username)
-			common.ExecuteRemoteCommand(client, wrapSudo(cmd), common.DefaultCmdTimeout)
+			common.ExecuteRemoteCommand(client, wrapSudo(client, cmd), common.DefaultCmdTimeout)
 		}
 		fmt.Println(common.Green + "✅ User [" + username + "] is now fully quarantined and locked out." + common.Reset)
+		auditLog("quarantine_lock", "user="+username+" os="+sig.OS, "applied")
 
 	case "2":
 		if sig.OS == "windows" {
 			common.ExecuteRemoteCommand(client, fmt.Sprintf(`powershell -Command "Enable-LocalUser -Name '%s'"`, username), common.DefaultCmdTimeout)
 		} else if sig.OS == "darwin" {
-			common.ExecuteRemoteCommand(client, wrapSudo(fmt.Sprintf("dscl . -delete /Users/%s AuthenticationAuthority", username)), common.DefaultCmdTimeout)
+			common.ExecuteRemoteCommand(client, wrapSudo(client, fmt.Sprintf("dscl . -delete /Users/%s AuthenticationAuthority", username)), common.DefaultCmdTimeout)
 		} else {
 			cmd := fmt.Sprintf("passwd -u %s", username)
-			common.ExecuteRemoteCommand(client, wrapSudo(cmd), common.DefaultCmdTimeout)
+			common.ExecuteRemoteCommand(client, wrapSudo(client, cmd), common.DefaultCmdTimeout)
 		}
 		fmt.Println(common.Green + "✅ User [" + username + "] unlocked successfully." + common.Reset)
+		auditLog("quarantine_unlock", "user="+username+" os="+sig.OS, "applied")
 
 	case "3":
 		fmt.Print(common.Red + "Type 'PURGE' to permanently delete user [" + username + "] and all files: " + common.Reset)
@@ -2924,9 +3130,11 @@ print(f'NUCLEAR_PURGE_SUCCESS|Purged {len(to_purge)} users.')
 			if sig.OS == "windows" {
 				common.ExecuteRemoteCommand(client, fmt.Sprintf(`powershell -Command "Remove-LocalUser -Name '%s'"`, username), common.DefaultCmdTimeout)
 				fmt.Println(common.Green + "✅ User [" + username + "] purged from Windows." + common.Reset)
+				auditLog("quarantine_purge_single", "user="+username+" os=windows", "applied")
 			} else if sig.OS == "darwin" {
-				common.ExecuteRemoteCommand(client, wrapSudo(fmt.Sprintf("sysadminctl -deleteUser %s", username)), common.DefaultCmdTimeout)
+				common.ExecuteRemoteCommand(client, wrapSudo(client, fmt.Sprintf("sysadminctl -deleteUser %s", username)), common.DefaultCmdTimeout)
 				fmt.Println(common.Green + "✅ User [" + username + "] purged from macOS." + common.Reset)
+				auditLog("quarantine_purge_single", "user="+username+" os=darwin", "applied")
 			} else {
 				singlePurgeScript := fmt.Sprintf(`
 python3 -c "
@@ -2966,15 +3174,18 @@ subprocess.run(['systemctl', 'reload', 'sshd'], check=False)
 print('SINGLE_PURGE_SUCCESS')
 "
 `, username, rbacTierRegistry)
-				out, err := common.ExecuteRemoteCommand(client, wrapSudo(singlePurgeScript), common.DefaultCmdTimeout)
+				out, err := common.ExecuteRemoteCommand(client, wrapSudo(client, singlePurgeScript), common.DefaultCmdTimeout)
 				if err == nil && strings.Contains(out, "SINGLE_PURGE_SUCCESS") {
 					fmt.Println(common.Green + "✅ User [" + username + "] has been completely removed from the system." + common.Reset)
+					auditLog("quarantine_purge_single", "user="+username+" os=linux", "applied")
 				} else {
 					fmt.Printf(common.Red+"[!] Error purging user: %v\nOutput: %s\n"+common.Reset, err, out)
+					auditLog("quarantine_purge_single", "user="+username+" os=linux", "failed")
 				}
 			}
 		} else {
 			fmt.Println(common.Yellow + "[!] Purge aborted." + common.Reset)
+			auditLog("quarantine_purge_single", "user="+username, "cancelled")
 		}
 	default:
 		return

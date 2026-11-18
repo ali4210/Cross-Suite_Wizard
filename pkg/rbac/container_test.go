@@ -170,11 +170,18 @@ func (c *rbacTestContainer) dial(t *testing.T, user, password string) *ssh.Clien
 	return nil
 }
 
-func withSavedSudoPassword(t *testing.T, value string) {
+func withSavedSudoPassword(t *testing.T, client *ssh.Client, value string) {
 	t.Helper()
-	prev := localSudoPassword
-	localSudoPassword = value
-	t.Cleanup(func() { localSudoPassword = prev })
+	key := sudoCacheKey(client)
+	prev, existed := sudoPasswordCache[key]
+	sudoPasswordCache[key] = value
+	t.Cleanup(func() {
+		if existed {
+			sudoPasswordCache[key] = prev
+		} else {
+			delete(sudoPasswordCache, key)
+		}
+	})
 }
 
 func testTimeout() time.Duration { return 10 * time.Second }
@@ -185,7 +192,7 @@ func TestChpasswdPasswordDeliveredOnlyViaStdinNotArgv(t *testing.T) {
 	c := requireSharedContainer(t)
 	client := c.dial(t, "tester", testerPassword)
 	defer client.Close()
-	withSavedSudoPassword(t, testerPassword)
+	withSavedSudoPassword(t, client, testerPassword)
 
 	// Stub chpasswd: records its own argv and whatever it received on stdin,
 	// instead of touching the real shadow file. This lets us assert — for
@@ -250,7 +257,7 @@ func TestChpasswdSetPasswordAllowsRealSSHLogin(t *testing.T) {
 	c := requireSharedContainer(t)
 	client := c.dial(t, "tester", testerPassword)
 	defer client.Close()
-	withSavedSudoPassword(t, testerPassword)
+	withSavedSudoPassword(t, client, testerPassword)
 
 	c.exec(t, "id -u newuser >/dev/null 2>&1 || useradd -m -s /bin/bash newuser")
 
@@ -289,7 +296,7 @@ func TestIPStackScriptDoesNotWriteSSHDMatchBlockOrLockOutUser(t *testing.T) {
 	c := requireSharedContainer(t)
 	root := c.dial(t, "tester", testerPassword)
 	defer root.Close()
-	withSavedSudoPassword(t, testerPassword)
+	withSavedSudoPassword(t, root, testerPassword)
 
 	stackedPassword := "Stacked-User-Keeps-SSH-1!"
 	c.exec(t, "id -u stackeduser >/dev/null 2>&1 || useradd -m -s /bin/bash stackeduser")
@@ -306,7 +313,7 @@ func TestIPStackScriptDoesNotWriteSSHDMatchBlockOrLockOutUser(t *testing.T) {
 	// (that helper is for simple single-token commands like "chpasswd", not a
 	// multi-line script full of embedded quotes).
 	script := buildIPStackScript("10.99.0.50/32", "lo", "stackeduser")
-	out, err := common.ExecuteRemoteCommand(root, wrapSudo(script), testTimeout())
+	out, err := common.ExecuteRemoteCommand(root, wrapSudo(root, script), testTimeout())
 	if err != nil || !strings.Contains(out, "IP_PROVISION_OK") {
 		t.Fatalf("buildIPStackScript did not report success: err=%v out=%s", err, out)
 	}
@@ -379,7 +386,7 @@ func TestApplyPortRuleRemoveBlanketWhenRuleIsPresent(t *testing.T) {
 	c := requireSharedContainer(t)
 	client := c.dial(t, "tester", testerPassword)
 	defer client.Close()
-	withSavedSudoPassword(t, testerPassword)
+	withSavedSudoPassword(t, client, testerPassword)
 
 	uidOut := strings.TrimSpace(c.exec(t, "id -u tester"))
 	// First -L call reports a blanket-allow rule for this UID; second call (after
@@ -406,7 +413,7 @@ func TestApplyPortRuleRemoveBlanketWhenRuleIsAbsent(t *testing.T) {
 	c := requireSharedContainer(t)
 	client := c.dial(t, "tester", testerPassword)
 	defer client.Close()
-	withSavedSudoPassword(t, testerPassword)
+	withSavedSudoPassword(t, client, testerPassword)
 
 	uidOut := strings.TrimSpace(c.exec(t, "id -u tester"))
 	installStubIPTables(t, c, []string{""})
@@ -425,7 +432,7 @@ func TestApplyPortRuleRemoveBlanketReportsRealErrorNeverFalseSuccess(t *testing.
 	c := requireSharedContainer(t)
 	client := c.dial(t, "tester", testerPassword)
 	defer client.Close()
-	withSavedSudoPassword(t, testerPassword)
+	withSavedSudoPassword(t, client, testerPassword)
 
 	uidOut := strings.TrimSpace(c.exec(t, "id -u tester"))
 	// A stub that always exits non-zero simulates an iptables failure (e.g. the
