@@ -50,10 +50,12 @@ emerge --sync 2>&1 | tail -60
 		strings.Contains(lower, "getaddrinfo failed") ||
 		strings.Contains(lower, "name or service not known") ||
 		strings.Contains(lower, "exhausted addresses"):
-		// Real wording (verified against a live Gentoo stage3 container with an
-		// unreachable rsync mirror): "getaddrinfo failed for '<host>': name or service not
-		// known" and "exhausted addresses for <host>". Checked before the generic rsync
-		// case below so a DNS failure gets DNS-specific guidance, not just "rsync failed".
+		// Real wording — verified by actually running `emerge --sync` against a live
+		// gentoo/stage3 Docker container with an unreachable rsync mirror; the exact
+		// captured output is the fixture in TestEmergeAdapterDNSFailureMatchesRealWording
+		// (generic_adapters_test.go), which also documents how to reproduce it. Checked
+		// before the generic rsync case below so a DNS failure gets DNS-specific
+		// guidance, not just "rsync failed".
 		findings = append(findings, Finding{
 			Code:            "EMERGE_SYNC_NETWORK_FAILURE",
 			Severity:        SeverityError,

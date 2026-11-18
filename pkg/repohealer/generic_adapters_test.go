@@ -486,17 +486,27 @@ func TestEmergeAdapterNeverProposesAutoAction(t *testing.T) {
 	}
 }
 
-// Regression test for real emerge wording confirmed against a live Gentoo stage3
-// container with an unreachable rsync mirror configured.
+// Regression test for real emerge wording. This fixture is the verbatim captured
+// output of `emerge --sync` run for real inside a gentoo/stage3:latest Docker
+// container (Portage 3.0.83) whose /etc/portage/repos.conf/gentoo.conf pointed
+// sync-uri at rsync://this-mirror-does-not-exist.invalid/gentoo-portage — not
+// synthesized or guessed. Reproduce with:
+//
+//	docker run --rm \
+//	  -v /path/to/repos.conf:/etc/portage/repos.conf/gentoo.conf:ro \
+//	  gentoo/stage3:latest bash -c "mkdir -p /var/db/repos/gentoo && emerge --sync"
 func TestEmergeAdapterDNSFailureMatchesRealWording(t *testing.T) {
 	exec := &fakeExecutor{
 		runSudoOutputs: []string{
-			">>> syncing repository 'gentoo' into '/var/db/repos/gentoo'...\n" +
-				"!!! getaddrinfo failed for 'totally-nonexistent-mirror.invalid': [errno -2] name or service not known\n" +
-				">>> starting rsync with rsync://totally-nonexistent-mirror.invalid/gentoo-portage...\n" +
-				"rsync: getaddrinfo: totally-nonexistent-mirror.invalid 873: name or service not known\n" +
-				"rsync error: error in socket io (code 10) at clientserver.c(165) [receiver=3.5.1]\n" +
-				"!!! exhausted addresses for totally-nonexistent-mirror.invalid\n",
+			">>> Syncing repository 'gentoo' into '/var/db/repos/gentoo'...\n" +
+				" * Using keys from /usr/share/openpgp-keys/gentoo-release.asc\n" +
+				" * Refreshing keys via WKD ...                                           [ ok ]\n" +
+				"!!! getaddrinfo failed for 'this-mirror-does-not-exist.invalid': [Errno -2] Name or service not known\n" +
+				">>> Starting rsync with rsync://this-mirror-does-not-exist.invalid/gentoo-portage...\n" +
+				"rsync: getaddrinfo: this-mirror-does-not-exist.invalid 873: Name or service not known\n" +
+				"rsync error: error in socket IO (code 10) at clientserver.c(169) [Receiver=3.5.2]\n" +
+				"!!! Exhausted addresses for this-mirror-does-not-exist.invalid\n" +
+				">>> Retrying...\n",
 		},
 	}
 
