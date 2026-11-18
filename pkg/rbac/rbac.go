@@ -1298,17 +1298,22 @@ func fetchActiveNetworkInterfaces(client *ssh.Client) []NetworkInterface {
 	return ifaces
 }
 
-func ShowRBACMenu(reader *bufio.Reader, client *ssh.Client, host string) {
-	// F-06: if the target changed since we were last here, drop every cached
-	// elevation password for the previous host rather than letting it linger in
-	// memory unused. This is a hygiene measure; sudoCacheKey already guarantees a
-	// different host's cached password can never be looked up for this one even
-	// without this step.
+// dropSudoCacheOnHostSwitch clears every cached elevation password as soon as the
+// target changes since this was last called, rather than letting a previous
+// host's password linger in memory unused. This is a hygiene measure on top of
+// sudoCacheKey's per-host scoping, which already guarantees a different host's
+// cached password can never be looked up for this one even without this step.
+// See F-06.
+func dropSudoCacheOnHostSwitch(client *ssh.Client) {
 	key := sudoCacheKey(client)
 	if lastSudoHostKey != "" && lastSudoHostKey != key {
 		sudoPasswordCache = make(map[string]string)
 	}
 	lastSudoHostKey = key
+}
+
+func ShowRBACMenu(reader *bufio.Reader, client *ssh.Client, host string) {
+	dropSudoCacheOnHostSwitch(client)
 
 	if !ensureElevation(client) {
 		fmt.Println(common.Red + "[!] Authentication failed. Access to Access Control Assigner denied." + common.Reset)
@@ -1811,6 +1816,37 @@ func validateCustomSudoersPaths(raw string) ([]string, error) {
 	}
 	return cleaned, nil
 }
+
+// buildSudoersInstallScript validates and installs a sudoers rule atomically.
+// sudoersContent is delivered via base64 -d rather than interpolated into a shell
+// string, so no quote/backtick/$()/newline in it can ever be interpreted by the
+// shell — only visudo -cf ever parses it, as sudoers syntax. The previous target
+// file (if any) is snapshotted to BACKUP_FILE before being replaced, and nothing
+// is overwritten unless visudo accepts the new content first. See F-07.
+func buildSudoersInstallScript(username, sudoersContent string) string {
+	b64SudoersContent := base64.StdEncoding.EncodeToString([]byte(sudoersContent + "\n"))
+	return fmt.Sprintf(`
+TMP_FILE="/etc/sudoers.d/.tmp_rbac_%s"
+TARGET_FILE="/etc/sudoers.d/cross_rbac_%s"
+BACKUP_FILE="/etc/sudoers.d/.bak_rbac_%s"
+
+echo "%s" | base64 -d > "$TMP_FILE"
+chmod 0440 "$TMP_FILE"
+
+if visudo -cf "$TMP_FILE" >/dev/null 2>&1; then
+    if [ -f "$TARGET_FILE" ]; then
+        cp -p "$TARGET_FILE" "$BACKUP_FILE"
+    fi
+    mv "$TMP_FILE" "$TARGET_FILE"
+    echo "VISUDO_SUCCESS"
+else
+    rm -f "$TMP_FILE"
+    echo "VISUDO_FAILED_SYNTAX_ERROR"
+    exit 1
+fi
+`, username, username, username, b64SudoersContent)
+}
+
 func manageUserRBACTiers(reader *bufio.Reader, client *ssh.Client) {
 	fmt.Print("\033[H\033[2J")
 	fmt.Println(common.Cyan + common.Bold + "=== ROLE-BASED ACCESS CONTROL (RBAC) PRIVILEGE TIERING ===" + common.Reset)
@@ -1942,32 +1978,7 @@ if os.path.exists(reg):
 		return
 	}
 
-	// F-07: sudoersContent is written via base64, never interpolated into a shell
-	// string, so no quote/backtick/$()/newline in it can ever be interpreted by the
-	// shell — only visudo -cf ever parses it, as sudoers syntax. The previous target
-	// file (if any) is snapshotted before being replaced, and nothing is overwritten
-	// unless visudo accepts the new content first.
-	b64SudoersContent := base64.StdEncoding.EncodeToString([]byte(sudoersContent + "\n"))
-	script := fmt.Sprintf(`
-TMP_FILE="/etc/sudoers.d/.tmp_rbac_%s"
-TARGET_FILE="/etc/sudoers.d/cross_rbac_%s"
-BACKUP_FILE="/etc/sudoers.d/.bak_rbac_%s"
-
-echo "%s" | base64 -d > "$TMP_FILE"
-chmod 0440 "$TMP_FILE"
-
-if visudo -cf "$TMP_FILE" >/dev/null 2>&1; then
-    if [ -f "$TARGET_FILE" ]; then
-        cp -p "$TARGET_FILE" "$BACKUP_FILE"
-    fi
-    mv "$TMP_FILE" "$TARGET_FILE"
-    echo "VISUDO_SUCCESS"
-else
-    rm -f "$TMP_FILE"
-    echo "VISUDO_FAILED_SYNTAX_ERROR"
-    exit 1
-fi
-`, username, username, username, b64SudoersContent)
+	script := buildSudoersInstallScript(username, sudoersContent)
 
 	fmt.Println(common.Cyan + "[+] Validating and applying RBAC rule atomically..." + common.Reset)
 	out, err := common.ExecuteRemoteCommand(client, wrapSudo(client, script), common.DefaultCmdTimeout)
