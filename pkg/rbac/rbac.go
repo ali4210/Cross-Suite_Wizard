@@ -1406,7 +1406,7 @@ func ShowRBACMenu(reader *bufio.Reader, client *ssh.Client, host string) {
 		fmt.Println("  [8] Active Identity & Permission Matrix Auditor (Inspect Users, GeoIP & Tiers)")
 		fmt.Println(common.Red + "  [9] Emergency Quarantine, Single Purge & ULTIMATE MASS NUCLEAR PURGE (With Dry-Run)" + common.Reset)
 		fmt.Println("  [10] User Port Access Provider (Security-Group Style Ingress/Egress Port ACL)")
-		fmt.Println(common.Green + common.Bold + "  [11] Master Node — Switch Target to Another LAN Machine (Slave Host)" + common.Reset)
+		fmt.Println(common.Cyan + "  [11] LAN Discovery (read-only ping sweep — does not switch your target)" + common.Reset)
 		geoStatus := common.Red + "OFF (default)"
 		if geoLookupEnabled {
 			geoStatus = common.Green + "ON"
@@ -1984,10 +1984,21 @@ func manageUserRBACTiers(reader *bufio.Reader, client *ssh.Client) {
 	fmt.Printf("\nSelected Target: [%s] (Target OS: %s)\n", username, sig.OS)
 	fmt.Println("Available Privilege Tiers:")
 	fmt.Println("  [1] Tier 1: Super-Admin (Full Unrestricted Root / Admin Access)")
-	fmt.Println("  [2] Tier 2: DevOps Engineer (Docker, K8s, Systemd, Logs, Network Mgmt)")
-	fmt.Println("  [3] Tier 3: Security Auditor (Read-Only commands: ss, ps, journalctl, nmap, cat, ls)")
-	fmt.Println("  [4] Tier 4: Database Administrator (PostgreSQL, MySQL, Redis, Dump tools)")
-	fmt.Println("  [5] Tier 5: Custom Whitelist (Enter specific allowed binary paths)")
+	// F-13: tiers 2-5 are POSIX sudoers rules — there is no Windows/macOS
+	// equivalent implemented, and the menu used to claim otherwise identically
+	// on every OS, only revealing the gap after the operator had already
+	// picked one. Mark them unavailable up front on non-Linux targets instead.
+	if sig.OS == "windows" || sig.OS == "darwin" {
+		fmt.Println(common.Yellow + "  [2] Tier 2: DevOps Engineer — unavailable on " + sig.OS + " (POSIX sudoers only)" + common.Reset)
+		fmt.Println(common.Yellow + "  [3] Tier 3: Security Auditor — unavailable on " + sig.OS + " (POSIX sudoers only)" + common.Reset)
+		fmt.Println(common.Yellow + "  [4] Tier 4: Database Administrator — unavailable on " + sig.OS + " (POSIX sudoers only)" + common.Reset)
+		fmt.Println(common.Yellow + "  [5] Tier 5: Custom Whitelist — unavailable on " + sig.OS + " (POSIX sudoers only)" + common.Reset)
+	} else {
+		fmt.Println("  [2] Tier 2: DevOps Engineer (Docker, K8s, Systemd, Logs, Network Mgmt)")
+		fmt.Println("  [3] Tier 3: Security Auditor (Read-Only commands: ss, ps, journalctl, nmap, cat, ls)")
+		fmt.Println("  [4] Tier 4: Database Administrator (PostgreSQL, MySQL, Redis, Dump tools)")
+		fmt.Println("  [5] Tier 5: Custom Whitelist (Enter specific allowed binary paths)")
+	}
 	fmt.Println("  [6] Revoke All Elevated Privileges (Demote to standard unprivileged user)")
 	fmt.Println("  [0] Cancel")
 	fmt.Print("Select RBAC Tier [0-6]: ")
@@ -2011,7 +2022,7 @@ func manageUserRBACTiers(reader *bufio.Reader, client *ssh.Client) {
 			fmt.Printf(common.Green+"✅ All elevated privileges revoked for user [%s]!\n"+common.Reset, username)
 			auditLog("rbac_tier_change", "user="+username+" os=windows tier=revoke", "applied")
 		} else {
-			fmt.Println(common.Yellow + "[!] Granular sudoers whitelisting is tailored for POSIX. User remains in standard group." + common.Reset)
+			fmt.Println(common.Red + "[!] Tier [" + tierChoice + "] is unavailable on Windows: there is no granular sudoers-style equivalent implemented. User remains in their current group." + common.Reset)
 		}
 		common.PausePrompt()
 		return
@@ -2029,7 +2040,7 @@ func manageUserRBACTiers(reader *bufio.Reader, client *ssh.Client) {
 			fmt.Printf(common.Green+"✅ Privileges revoked for user [%s] on macOS!\n"+common.Reset, username)
 			auditLog("rbac_tier_change", "user="+username+" os=darwin tier=revoke", "applied")
 		} else {
-			fmt.Println(common.Yellow + "[!] Custom whitelists for macOS are applied via standard sudoers." + common.Reset)
+			fmt.Println(common.Red + "[!] Tier [" + tierChoice + "] is unavailable on macOS: there is no granular sudoers-style equivalent implemented. User remains in their current group." + common.Reset)
 		}
 		common.PausePrompt()
 		return
@@ -3366,27 +3377,55 @@ print('SINGLE_PURGE_SUCCESS')
 // -----------------------------------------------------------------------------
 // [11] Master Node Switch
 // -----------------------------------------------------------------------------
+// discoverLANSubnet finds the target's real primary network and returns it in
+// nmap -sn's address/CIDR form (e.g. "10.0.5.0/24"), instead of assuming every
+// target sits on 192.168.0.0/24. Falls back to that historical default only if
+// no usable interface/CIDR can be determined. See F-04.
+func discoverLANSubnet(client *ssh.Client) string {
+	const fallback = "192.168.0.0/24"
+	ifaces := fetchActiveNetworkInterfaces(client)
+	if len(ifaces) == 0 {
+		return fallback
+	}
+	sig := fetchHostSignature(client)
+	candidate := ifaces[0].IP
+	for _, iface := range ifaces {
+		if strings.HasPrefix(iface.IP, sig.PrimaryIP+"/") {
+			candidate = iface.IP
+			break
+		}
+	}
+	if !strings.Contains(candidate, "/") {
+		return fallback
+	}
+	_, network, err := net.ParseCIDR(candidate)
+	if err != nil {
+		return fallback
+	}
+	return network.String()
+}
+
+// manageMasterNode is a read-only LAN discovery helper. See F-04: this used to
+// be billed as "Master Node — Switch Target to Another LAN Machine" and asked
+// for a new target IP, but it never actually switched anything — it just
+// printed a message telling the operator to go use the real feature instead,
+// on a hardcoded 192.168.0.0/24 sweep that was wrong on any other subnet. It
+// now only discovers hosts and says plainly where the real target switch is.
 func manageMasterNode(reader *bufio.Reader, client *ssh.Client, host string) {
 	fmt.Print("\033[H\033[2J")
-	fmt.Println(common.Cyan + common.Bold + "=== MASTER NODE – SWITCH TARGET TO ANOTHER LAN MACHINE ===" + common.Reset)
+	fmt.Println(common.Cyan + common.Bold + "=== LAN DISCOVERY (READ-ONLY) ===" + common.Reset)
+	fmt.Println(common.Yellow + "This option only discovers other hosts on the target's local subnet. It" + common.Reset)
+	fmt.Println(common.Yellow + "does NOT switch your session to another machine." + common.Reset)
 
-	fmt.Printf("Current target host: %s\n", host)
+	fmt.Printf("\nCurrent target host: %s\n", host)
 
-	fmt.Println("\nDiscovering active hosts on the local subnet (ping sweep)...")
-	discoverCmd := `nmap -sn 192.168.0.0/24 2>/dev/null | grep -E "Nmap scan|MAC" | grep -v "Host is up" || echo "No nmap, try arp-scan"`
+	subnet := discoverLANSubnet(client)
+	fmt.Printf("\nDiscovering active hosts on %s (ping sweep)...\n", subnet)
+	discoverCmd := fmt.Sprintf(`nmap -sn %s 2>/dev/null | grep -E "Nmap scan|MAC" | grep -v "Host is up" || echo "No nmap, try arp-scan"`, subnet)
 	out, _ := common.ExecuteRemoteCommand(client, discoverCmd, common.DefaultCmdTimeout)
 	fmt.Println(out)
 
-	fmt.Print("\nEnter new target IP or hostname (or press Enter to cancel): ")
-	newTarget, _ := reader.ReadString('\n')
-	newTarget = strings.TrimSpace(newTarget)
-	if newTarget == "" {
-		fmt.Println(common.Yellow + "[!] No target entered. Returning." + common.Reset)
-		common.PausePrompt()
-		return
-	}
-
-	fmt.Printf(common.Yellow+"\nTo switch to %s, you must re‑authenticate from the main menu (the session will be replaced).\n"+common.Reset, newTarget)
-	fmt.Println("Please exit this menu and use the 'Switch Target' option from the main menu, or use the command line.")
+	fmt.Println(common.Cyan + "To actually connect to a different machine, go back to the Main Menu and use" + common.Reset)
+	fmt.Println(common.Cyan + "[1] Target Session Management & Vault → [9] Disconnect / Switch Active Target Host." + common.Reset)
 	common.PausePrompt()
 }

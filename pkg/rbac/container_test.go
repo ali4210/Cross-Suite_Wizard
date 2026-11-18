@@ -109,7 +109,7 @@ func buildRBACTestContainer() (*rbacTestContainer, error) {
 set -e
 export DEBIAN_FRONTEND=noninteractive
 apt-get -o Acquire::Check-Date=false update -qq
-apt-get install -y -qq openssh-server sudo python3 >/dev/null
+apt-get install -y -qq openssh-server sudo python3 iproute2 >/dev/null
 mkdir -p /run/sshd
 ssh-keygen -A >/dev/null
 sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
