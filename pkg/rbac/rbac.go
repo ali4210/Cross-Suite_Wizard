@@ -30,6 +30,39 @@ var sudoPasswordCache = map[string]string{}
 var lastSudoHostKey string
 var currentHostAlias string
 
+// geoLookupEnabled gates the Identity Matrix's optional geo-IP enrichment. OFF
+// by default: enabling it makes the remote host send users' public/assigned IP
+// addresses to the third-party service ip-api.com over plain HTTP (ip-api.com's
+// free tier does not offer HTTPS). The toggle persists for the rest of this run
+// once set via the menu, so the operator isn't re-asked on every screen. See F-09.
+var geoLookupEnabled bool
+
+// toggleGeoLookup flips geoLookupEnabled, disclosing exactly what turning it on
+// means before doing so. See F-09.
+func toggleGeoLookup(reader *bufio.Reader) {
+	if geoLookupEnabled {
+		geoLookupEnabled = false
+		fmt.Println(common.Green + "✅ Geo-IP lookup disabled. The Identity Matrix will no longer contact any third party." + common.Reset)
+		common.PausePrompt()
+		return
+	}
+
+	fmt.Println(common.Yellow + "\n⚠️  Enabling this will make the TARGET HOST send public and LAN-assigned IP" + common.Reset)
+	fmt.Println(common.Yellow + "   addresses to the third party ip-api.com, in plaintext over HTTP (ip-api.com's" + common.Reset)
+	fmt.Println(common.Yellow + "   free tier does not support HTTPS). This is cosmetic labeling only — it is not" + common.Reset)
+	fmt.Println(common.Yellow + "   part of this module's Zero-Trust or RBAC enforcement." + common.Reset)
+	fmt.Print(common.Bold + "Type 'ENABLE' to turn it on, or press Enter to cancel: " + common.Reset)
+	confirm, _ := reader.ReadString('\n')
+	if strings.TrimSpace(confirm) != "ENABLE" {
+		fmt.Println(common.Yellow + "[!] Cancelled. Geo-IP lookup remains disabled." + common.Reset)
+		common.PausePrompt()
+		return
+	}
+	geoLookupEnabled = true
+	fmt.Println(common.Green + "✅ Geo-IP lookup enabled for the rest of this session." + common.Reset)
+	common.PausePrompt()
+}
+
 func sudoCacheKey(client *ssh.Client) string {
 	return client.RemoteAddr().String() + "|" + client.User()
 }
@@ -893,8 +926,18 @@ func fetchSystemUsers(client *ssh.Client) []UserSummary {
 		return users
 	}
 
+	// F-09: off by default. Enabling it (toggleGeoLookup) sends IP addresses to
+	// the third party ip-api.com in plaintext HTTP; GEO_LOOKUP_ENABLED is a plain
+	// Python boolean literal, computed Go-side, never operator-influenced text.
+	geoLookupLiteral := "False"
+	if geoLookupEnabled {
+		geoLookupLiteral = "True"
+	}
+
 	scriptPython := fmt.Sprintf(`
 import pwd, spwd, os, glob, subprocess, re, json, urllib.request
+
+GEO_LOOKUP_ENABLED = %s
 
 host_lan_ip = '127.0.0.1'
 secondary_ips = []
@@ -909,17 +952,18 @@ try:
 except Exception:
     pass
 
-public_geo = 'Dhaka, BD'
-try:
-    req = urllib.request.Request('http://ip-api.com/json/?fields=city,countryCode', headers={'User-Agent': 'CrossSuite/1.0'})
-    with urllib.request.urlopen(req, timeout=1.5) as resp:
-        data = json.loads(resp.read().decode('utf-8'))
-        c = data.get('city', '')
-        cc = data.get('countryCode', '')
-        if c or cc:
-            public_geo = f'{c}, {cc}'.strip(', ')
-except Exception:
-    pass
+public_geo = 'Lookup disabled'
+if GEO_LOOKUP_ENABLED:
+    try:
+        req = urllib.request.Request('http://ip-api.com/json/?fields=city,countryCode', headers={'User-Agent': 'CrossSuite/1.0'})
+        with urllib.request.urlopen(req, timeout=1.5) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            c = data.get('city', '')
+            cc = data.get('countryCode', '')
+            if c or cc:
+                public_geo = f'{c}, {cc}'.strip(', ')
+    except Exception:
+        pass
 
 user_ips = {}
 for reg_path in ['/etc/cross_assigned_ips.txt', '/var/log/cross_assigned_ips.txt']:
@@ -997,6 +1041,9 @@ def resolve_geo(ip):
     if clean_ip in geo_cache:
         return geo_cache[clean_ip]
     if clean_ip.startswith(('127.', '10.', '192.168.', '172.16.', '172.17.', '172.18.', '172.19.', '172.20.', '172.21.', '172.22.', '172.23.', '172.24.', '172.25.', '172.26.', '172.27.', '172.28.', '172.29.', '172.30.', '172.31.')):
+        geo_cache[clean_ip] = public_geo
+        return public_geo
+    if not GEO_LOOKUP_ENABLED:
         geo_cache[clean_ip] = public_geo
         return public_geo
     try:
@@ -1083,7 +1130,7 @@ for p in pwd.getpwall():
     geo = resolve_geo(assigned_ip)
     is_tool = 'TOOL' if u_name in tool_created else 'SYSTEM'
     print(f'{u_name}|{p.pw_uid}|{assigned_ip}|{geo}|{short_shell}|{status}|{rbac}|{is_tool}')
-`, rbacTierRegistry, rbacTierRegistry)
+`, geoLookupLiteral, rbacTierRegistry, rbacTierRegistry)
 
 	b64Py := base64.StdEncoding.EncodeToString([]byte(scriptPython))
 	execCmd := fmt.Sprintf("python3 -c \"import base64; exec(base64.b64decode('%s').decode('utf-8'))\"", b64Py)
@@ -1225,13 +1272,26 @@ func renderUserTable(users []UserSummary) {
 	fmt.Println(common.Cyan + "└─────┴──────────────────┴───────┴──────────────────┴────────────────┴─────────┴──────────┴────────────────┴─────────────┴────────────────┘" + common.Reset)
 }
 
+// selectUserInteractive is the single chokepoint nearly every option in this
+// module uses to obtain a target username before interpolating it into a
+// remote shell/PowerShell/Python command. Both return paths are validated here
+// (F-08) rather than in each of the ~10 call sites, so none of them can be
+// bypassed by a future caller forgetting to re-check: the manual-entry
+// fallback is free text with no other gate at all, and the normal path's
+// values come from the remote system's own user listing, which is validated
+// here too as defense in depth.
 func selectUserInteractive(reader *bufio.Reader, client *ssh.Client, promptTitle string) string {
 	users := fetchSystemUsers(client)
 	if len(users) == 0 {
 		fmt.Println(common.Yellow + "[!] No users found on system." + common.Reset)
 		fmt.Print("Enter username manually: ")
 		manual, _ := reader.ReadString('\n')
-		return strings.TrimSpace(manual)
+		manual = strings.TrimSpace(manual)
+		if !isValidUsername(manual) {
+			fmt.Println(common.Red + "[!] Invalid username: must start with a letter or underscore and contain only letters, digits, '_' or '-' (max 32 chars)." + common.Reset)
+			return ""
+		}
+		return manual
 	}
 
 	labels := make([]string, len(users))
@@ -1247,7 +1307,12 @@ func selectUserInteractive(reader *bufio.Reader, client *ssh.Client, promptTitle
 	if idx == -1 {
 		return ""
 	}
-	return users[idx].Username
+	selected := users[idx].Username
+	if !isValidUsername(selected) {
+		fmt.Println(common.Red + "[!] Refusing to act on a username reported by the remote host that fails strict validation: " + selected + common.Reset)
+		return ""
+	}
+	return selected
 }
 
 func fetchActiveNetworkInterfaces(client *ssh.Client) []NetworkInterface {
@@ -1342,10 +1407,15 @@ func ShowRBACMenu(reader *bufio.Reader, client *ssh.Client, host string) {
 		fmt.Println(common.Red + "  [9] Emergency Quarantine, Single Purge & ULTIMATE MASS NUCLEAR PURGE (With Dry-Run)" + common.Reset)
 		fmt.Println("  [10] User Port Access Provider (Security-Group Style Ingress/Egress Port ACL)")
 		fmt.Println(common.Green + common.Bold + "  [11] Master Node — Switch Target to Another LAN Machine (Slave Host)" + common.Reset)
+		geoStatus := common.Red + "OFF (default)"
+		if geoLookupEnabled {
+			geoStatus = common.Green + "ON"
+		}
+		fmt.Printf("  [12] Toggle Third-Party Geo-IP Lookup for the Identity Matrix [%s%s]\n", geoStatus, common.Reset)
 		fmt.Println(common.Red + "  [0] Back to Main Menu" + common.Reset)
 		fmt.Println(common.Cyan + "--------------------------------------------------------------------------------" + common.Reset)
 
-		fmt.Print(common.Bold + "Select Access Control option [0-11]: " + common.Reset)
+		fmt.Print(common.Bold + "Select Access Control option [0-12]: " + common.Reset)
 		input, _ := reader.ReadString('\n')
 		choice := strings.TrimSpace(input)
 
@@ -1374,6 +1444,8 @@ func ShowRBACMenu(reader *bufio.Reader, client *ssh.Client, host string) {
 			managePortAccessControl(reader, client)
 		case "11":
 			manageMasterNode(reader, client, host)
+		case "12":
+			toggleGeoLookup(reader)
 		default:
 			fmt.Println(common.Yellow + "[!] Invalid choice." + common.Reset)
 			time.Sleep(1 * time.Second)
@@ -1391,8 +1463,11 @@ func provisionNewIdentity(reader *bufio.Reader, client *ssh.Client) {
 	fmt.Print("Enter New Username: ")
 	username, _ := reader.ReadString('\n')
 	username = strings.TrimSpace(username)
-	if username == "" || strings.ContainsAny(username, ";&|`$ \t\n\r") {
-		fmt.Println(common.Red + "[!] Invalid username." + common.Reset)
+	// F-08: strict allowlist, not a blocklist — the previous check rejected
+	// `;&|`$` and whitespace but not a bare apostrophe, which is exactly the
+	// delimiter the `u = '%s'` python/shell interpolations below rely on.
+	if !isValidUsername(username) {
+		fmt.Println(common.Red + "[!] Invalid username: must start with a letter or underscore and contain only letters, digits, '_' or '-' (max 32 chars)." + common.Reset)
 		common.PausePrompt()
 		return
 	}
@@ -1845,6 +1920,55 @@ else
     exit 1
 fi
 `, username, username, username, b64SudoersContent)
+}
+
+// -----------------------------------------------------------------------------
+// Shared input validators (F-08)
+// -----------------------------------------------------------------------------
+//
+// These replace ad-hoc blocklists (e.g. the pre-F-08 username check rejected
+// `;&|`$` and whitespace but not a bare apostrophe — exactly the delimiter every
+// `u = '%s'` python/shell interpolation in this file relies on) with strict
+// allowlists: a value that passes one of these can structurally never contain a
+// shell metacharacter, so it is safe to interpolate into the single-quoted
+// shell/PowerShell/Python string literals used throughout this file.
+
+// posixUsernameRe matches a conservative, portable POSIX account name: starts
+// with a letter or underscore, then letters/digits/underscore/hyphen, max 32
+// chars (the traditional utmp/Linux limit). This is deliberately stricter than
+// what useradd itself allows, which is the point of an allowlist.
+var posixUsernameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]{0,31}$`)
+
+// isValidUsername reports whether s is safe to interpolate into a shell,
+// PowerShell, or Python single-quoted string literal as a username. See F-08.
+func isValidUsername(s string) bool {
+	return posixUsernameRe.MatchString(s)
+}
+
+// isValidIP reports whether s parses as a plain IPv4 or IPv6 address (no CIDR
+// suffix) via the standard library, so it can never contain a shell
+// metacharacter. See F-08.
+func isValidIP(s string) bool {
+	return net.ParseIP(s) != nil
+}
+
+// isValidIPOrCIDR reports whether s parses as a plain IP address or an
+// address/CIDR pair via the standard library. See F-08.
+func isValidIPOrCIDR(s string) bool {
+	if net.ParseIP(s) != nil {
+		return true
+	}
+	_, _, err := net.ParseCIDR(s)
+	return err == nil
+}
+
+// hostnameRe matches a conservative DNS-safe hostname/FQDN: labels of
+// letters/digits/hyphens separated by dots, max 253 chars overall.
+var hostnameRe = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$`)
+
+// isValidHostname reports whether s is safe to interpolate as a hostname. See F-08.
+func isValidHostname(s string) bool {
+	return len(s) > 0 && len(s) <= 253 && hostnameRe.MatchString(s)
 }
 
 func manageUserRBACTiers(reader *bufio.Reader, client *ssh.Client) {
@@ -2316,9 +2440,19 @@ echo "DNS_REVERT_OK"
 		fmt.Print("Enter Primary DNS IP: ")
 		pDNS, _ := reader.ReadString('\n')
 		primaryDNS = strings.TrimSpace(pDNS)
+		if !isValidIP(primaryDNS) {
+			fmt.Println(common.Red + "[!] Invalid primary DNS IP address. No changes were made." + common.Reset)
+			common.PausePrompt()
+			return
+		}
 		fmt.Print("Enter Secondary DNS IP (Optional): ")
 		sDNS, _ := reader.ReadString('\n')
 		secondaryDNS = strings.TrimSpace(sDNS)
+		if secondaryDNS != "" && !isValidIP(secondaryDNS) {
+			fmt.Println(common.Red + "[!] Invalid secondary DNS IP address. No changes were made." + common.Reset)
+			common.PausePrompt()
+			return
+		}
 		dnsName = "Custom DNS"
 	default:
 		fmt.Println(common.Yellow + "[!] Invalid selection." + common.Reset)
@@ -2674,6 +2808,31 @@ func orchestrateHostNetwork(reader *bufio.Reader, client *ssh.Client) {
 	fmt.Print("Enter New Machine Hostname [or press Enter to keep current]: ")
 	newHostname, _ := reader.ReadString('\n')
 	newHostname = strings.TrimSpace(newHostname)
+
+	// F-08: these four fields were previously interpolated into shell/PowerShell
+	// commands with no validation at all. Reject the whole operation rather than
+	// silently drop or half-apply a change if any provided field doesn't parse as
+	// what it claims to be.
+	if newIP != "" && !isValidIPOrCIDR(newIP) {
+		fmt.Println(common.Red + "[!] Invalid IP/CIDR for the new primary address. No changes were made." + common.Reset)
+		common.PausePrompt()
+		return
+	}
+	if newGW != "" && !isValidIP(newGW) {
+		fmt.Println(common.Red + "[!] Invalid gateway IP address. No changes were made." + common.Reset)
+		common.PausePrompt()
+		return
+	}
+	if newDNS != "" && !isValidIP(newDNS) {
+		fmt.Println(common.Red + "[!] Invalid DNS IP address. No changes were made." + common.Reset)
+		common.PausePrompt()
+		return
+	}
+	if newHostname != "" && !isValidHostname(newHostname) {
+		fmt.Println(common.Red + "[!] Invalid hostname. No changes were made." + common.Reset)
+		common.PausePrompt()
+		return
+	}
 
 	sig := fetchHostSignature(client)
 
