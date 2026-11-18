@@ -1,0 +1,87 @@
+name: Module 7 RBAC Quality Gate
+
+on:
+  pull_request:
+    paths:
+      - 'pkg/rbac/**'
+      - '.github/workflows/module7-rbac.yml'
+      - 'go.mod'
+      - 'go.sum'
+  push:
+    branches:
+      - main
+    paths:
+      - 'pkg/rbac/**'
+      - '.github/workflows/module7-rbac.yml'
+      - 'go.mod'
+      - 'go.sum'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# This workflow builds, vets and tests module 7 (pkg/rbac) only. Most of its
+# tests spin up a real ubuntu:24.04 Docker container (real sshd, sudo, visudo,
+# passwd/shadow tools) and exercise the fixed code against it for real; see
+# pkg/rbac/container_test.go's TestMain. On windows-latest and macos-latest,
+# those container-dependent tests skip cleanly (this repo's Docker-in-Docker
+# isn't available/configured for Linux containers there) and only the
+# container-free pure-logic and validator tests actually run — gofmt and the
+# cross-compiled `go vet` checks still cover those platforms fully.
+jobs:
+  build-and-test:
+    name: Build & test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: go build ./...
+        run: go build ./...
+
+      - name: go vet ./pkg/rbac/...
+        run: go vet ./pkg/rbac/...
+
+      - name: gofmt check (pkg/rbac)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          unformatted=$(gofmt -l pkg/rbac/*.go)
+          if [ -n "$unformatted" ]; then
+            echo "The following files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Cross-compile vet (GOOS=windows)
+        if: runner.os == 'Linux'
+        run: go vet ./pkg/rbac/...
+        env:
+          GOOS: windows
+
+      - name: Cross-compile vet (GOOS=darwin)
+        if: runner.os == 'Linux'
+        run: go vet ./pkg/rbac/...
+        env:
+          GOOS: darwin
+
+      - name: go test pkg/rbac
+        run: go test -count=1 -v ./pkg/rbac/...
+        # On ubuntu-latest (Docker with Linux containers available) this runs
+        # the full real-container suite from A-PR 1-4: real sshd/sudo/visudo,
+        # a real SSH login as a newly-provisioned user, a real atomic sudoers
+        # install, etc. On windows-latest/macos-latest the container-dependent
+        # tests skip cleanly via TestMain, and only the container-free
+        # pure-logic/validator/static-AST tests run for real there.
