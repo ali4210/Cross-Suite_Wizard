@@ -60,9 +60,11 @@ func RenderAPTSource(profile VendorProfile, input SourceRenderInput) (string, er
 			profile.Components,
 		), nil
 
-	case "jenkins":
-		// Jenkins publishes a "flat" repository (no Suites/Components split): a single
-		// directory URL with a trailing slash, and no arch= directive in its documented line.
+	case "jenkins", "kubernetes-v1-31":
+		// Both Jenkins and Kubernetes (pkgs.k8s.io) publish a "flat" repository (no
+		// Suites/Components split): a single directory URL with a trailing slash, and no
+		// arch= directive in their documented lines. Kubernetes' flat URL is also keyed
+		// per minor version (see the kubernetes-v1-31 profile's comment).
 		return fmt.Sprintf(
 			"deb [signed-by=%s] %s %s",
 			profile.KeyringPath,
@@ -71,6 +73,26 @@ func RenderAPTSource(profile VendorProfile, input SourceRenderInput) (string, er
 		), nil
 
 	default:
+		// A profile with SupportedCodenames set wants its suite resolved from the
+		// target's codename (e.g. Sensu/Zabbix/Tailscale/Cloudflare's suite is just the
+		// codename itself with no suffix, MongoDB's is "<codename>/mongodb-org/9.0") —
+		// the same ResolveCodenameSuite mechanism postgresql-pgdg's dedicated case above
+		// already uses, generalized here so a vendor needing only that doesn't need its
+		// own case.
+		if len(profile.SupportedCodenames) > 0 {
+			suite, err := ResolveCodenameSuite(profile, input)
+			if err != nil {
+				return "", err
+			}
+			return fmt.Sprintf(
+				"deb [arch=%s signed-by=%s] %s %s %s",
+				architecture,
+				profile.KeyringPath,
+				profile.AllowedURLPrefixes[0],
+				suite,
+				profile.Components,
+			), nil
+		}
 		if profile.Suite != "" && profile.Components != "" {
 			return fmt.Sprintf(
 				"deb [arch=%s signed-by=%s] %s %s %s",
@@ -149,6 +171,26 @@ func RenderAPTDeb822Source(profile VendorProfile, input SourceRenderInput) (stri
 		), nil
 
 	default:
+		// See the matching generalization in RenderAPTSource's default case above.
+		if len(profile.SupportedCodenames) > 0 {
+			suite, err := ResolveCodenameSuite(profile, input)
+			if err != nil {
+				return "", err
+			}
+			return fmt.Sprintf(
+				"Types: deb\n"+
+					"URIs: %s\n"+
+					"Suites: %s\n"+
+					"Components: %s\n"+
+					"Architectures: %s\n"+
+					"Signed-By: %s\n",
+				profile.AllowedURLPrefixes[0],
+				suite,
+				profile.Components,
+				architecture,
+				profile.KeyringPath,
+			), nil
+		}
 		if profile.Suite != "" && profile.Components != "" {
 			return fmt.Sprintf(
 				"Types: deb\n"+
