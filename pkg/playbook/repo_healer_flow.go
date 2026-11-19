@@ -155,23 +155,46 @@ func runSelectedRepositoryRepairFlow(
 		),
 	)
 
-	execution := repohealer.ApproveAndApplyAPTRepair(
-		repoHealerExecutor{client: client},
-		result,
-		selectedAction.ID,
-		confirmation,
-	)
+	var execution repohealer.ApprovalExecutionResult
+	if isRPMFamilyRepairAction(selectedAction) {
+		if !printOperatorPolicyGateIfDisabled(
+			repohealer.RPMRepairExecutionEnabledEnv,
+			repohealer.RPMRepairExecutionEnabled(),
+		) {
+			return
+		}
+		execution = repohealer.ApproveAndApplyRPMRepair(
+			repoHealerExecutor{client: client},
+			result,
+			selectedAction.ID,
+			confirmation,
+		)
+	} else {
+		execution = repohealer.ApproveAndApplyAPTRepair(
+			repoHealerExecutor{client: client},
+			result,
+			selectedAction.ID,
+			confirmation,
+		)
+	}
 
 	fmt.Println("\n" + repohealer.FormatApprovalExecutionResult(execution))
 
-	audit := repohealer.BuildRepairAuditEvent(execution, time.Now())
+	var audit repohealer.RepairAuditEvent
+	var auditPath string
+	if isRPMFamilyRepairAction(selectedAction) {
+		audit = repohealer.BuildRPMRepairAuditEvent(execution, time.Now())
+		auditPath = repohealer.RPMRepairAuditPath()
+	} else {
+		audit = repohealer.BuildRepairAuditEvent(execution, time.Now())
+		auditPath = repohealer.RepairAuditPath()
+	}
 	fmt.Printf(
 		Cyan+"Audit event: decision=%s failure_category=%s\n"+Reset,
 		audit.Decision,
 		audit.FailureCategory,
 	)
 
-	auditPath := repohealer.RepairAuditPath()
 	if err := repohealer.AppendRepairAuditEvent(auditPath, audit); err != nil {
 		fmt.Fprintf(
 			os.Stderr,
@@ -527,6 +550,19 @@ func printOperatorPolicyGateIfDisabled(envVar string, enabled bool) bool {
 // must never be diagnosed through the Deb822 readiness report.
 func shouldRouteThroughAPTListRepairFlow(action repohealer.RepairAction) bool {
 	return action.SourceFormat == repohealer.SourceFormatAPTList
+}
+
+// isRPMFamilyRepairAction reports whether the selected action belongs to the dnf/yum/zypper
+// pipeline rather than APT's — the only branch point the eligible/apply path needs, since
+// ApproveAndApplyRPMRepair already re-validates everything else (profile match, finding
+// code, approval) on its own.
+func isRPMFamilyRepairAction(action repohealer.RepairAction) bool {
+	switch action.Target.PackageManager {
+	case repohealer.ManagerDNF, repohealer.ManagerYUM, repohealer.ManagerZypper:
+		return true
+	default:
+		return false
+	}
 }
 
 // blockedRepositoryRepairActionStatusLabel names which repair path a blocked action will route

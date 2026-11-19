@@ -91,6 +91,7 @@ func (e *Engine) Run() Result {
 	}
 
 	result.Actions = append(result.Actions, BuildRepairPlan(result)...)
+	result.Actions = append(result.Actions, BuildRPMRepairPlan(result)...)
 	result.VerificationOK = !hasBlockingFindings(result.Findings)
 	result.ChangesApplied = false
 	result.CompletedAt = time.Now().UTC()

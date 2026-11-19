@@ -48,6 +48,10 @@ zypper --non-interactive refresh 2>&1
 `)
 	lower := strings.ToLower(refresh)
 
+	repoList := runSudo(`set +e
+zypper --non-interactive lr -u 2>&1
+`)
+
 	if strings.Contains(lockState, "LOCK_PRESENT") && strings.Contains(lockState, "ZYPPER_NOT_RUNNING") {
 		action := RepairAction{
 			ID:              "zypper-remove-stale-lock",
@@ -74,7 +78,7 @@ zypper --non-interactive refresh 2>&1
 
 	switch {
 	case strings.Contains(lower, "signature verification failed") || strings.Contains(lower, "gpg check"):
-		findings = append(findings, Finding{
+		finding := Finding{
 			Code:            "ZYPPER_REPO_GPG_FAILURE",
 			Severity:        SeverityError,
 			Risk:            RiskManual,
@@ -82,7 +86,18 @@ zypper --non-interactive refresh 2>&1
 			RecommendedFix:  "Import only the repository's vendor-published key (rpm --import <vendor-key-url>). Never accept an unverified key as a repair.",
 			AutoRepairable:  false,
 			RequiresConsent: true,
-		})
+		}
+		// See the matching comment in dnf.go: attribute to a known, pinned-fingerprint
+		// vendor profile when the broken repo's URI matches one, so the known-vendor
+		// RPM repair pipeline can offer a gated, verified re-trust.
+		if profile, repoFile, ok := discoverKnownRPMVendorRepo(ManagerZypper, repoList); ok {
+			finding.RepositoryURL = profile.AllowedURLPrefixes[0]
+			finding.SourceFile = repoFile
+			finding.Risk = RiskKnownVendor
+			finding.AutoRepairable = true
+			finding.RecommendedFix = "Re-verify and re-import " + profile.DisplayName + "'s pinned signing key via the known-vendor RPM repair flow."
+		}
+		findings = append(findings, finding)
 
 	case strings.Contains(lower, "repository") && (strings.Contains(lower, "not found") || strings.Contains(lower, "forbidden")):
 		findings = append(findings, Finding{

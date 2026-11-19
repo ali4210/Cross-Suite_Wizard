@@ -8,7 +8,7 @@ import (
 func FormatApprovalExecutionResult(result ApprovalExecutionResult) string {
 	var builder strings.Builder
 
-	builder.WriteString("APT Repository Repair Result\n")
+	builder.WriteString(repositoryRepairResultTitle(result.Action.Target.PackageManager))
 	builder.WriteString(strings.Repeat("=", 80))
 	builder.WriteString("\n")
 	builder.WriteString(fmt.Sprintf("Decision: %s\n", displayApprovalDecision(result.Decision)))
@@ -87,6 +87,15 @@ func formatExecutedRepairResult(builder *strings.Builder, repair RepairResult) {
 			"Verification output: %s\n",
 			repair.VerificationOut,
 		))
+	}
+}
+
+func repositoryRepairResultTitle(manager PackageManager) string {
+	switch manager {
+	case ManagerDNF, ManagerYUM, ManagerZypper:
+		return "RPM Repository Repair Result\n"
+	default:
+		return "APT Repository Repair Result\n"
 	}
 }
 

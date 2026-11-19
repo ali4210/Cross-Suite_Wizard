@@ -54,7 +54,7 @@ func (a DNFAdapter) Diagnose(
 	inventory := runSudo(fmt.Sprintf(`
 set +e
 echo '=== REPOLIST ==='
-%[1]s repolist -v 2>&1
+%[1]s repoinfo 2>&1
 echo '=== HISTORY ==='
 %[1]s history list 2>&1 | head -20
 echo '=== RPMDB ==='
@@ -72,7 +72,7 @@ rpm --quiet -Va --nofiles --nodeps 2>&1 | head -10
 	case strings.Contains(lowerCache, "gpg check failed") ||
 		strings.Contains(lowerCache, "nokey") ||
 		strings.Contains(lowerCache, "public key"):
-		findings = append(findings, Finding{
+		finding := Finding{
 			Code:            "DNF_REPO_GPG_FAILURE",
 			Severity:        SeverityError,
 			Risk:            RiskManual,
@@ -80,7 +80,20 @@ rpm --quiet -Va --nofiles --nodeps 2>&1 | head -10
 			RecommendedFix:  "Identify the repository's vendor-published key and import only that pinned key (rpm --import <vendor-key-url>). Never disable gpgcheck as a repair.",
 			AutoRepairable:  false,
 			RequiresConsent: true,
-		})
+		}
+		// If the broken repo's baseurl matches a known, pinned-fingerprint vendor
+		// profile, attribute the finding to it so the known-vendor RPM repair pipeline
+		// (rpm_repair.go) can offer a gated, verified re-trust instead of leaving this
+		// permanently manual-only — mirroring how apt.go's diagnose resolves a
+		// RepositoryURL per finding by parsing the actual configured source.
+		if profile, repoFile, ok := discoverKnownRPMVendorRepo(a.Manager(), inventory); ok {
+			finding.RepositoryURL = profile.AllowedURLPrefixes[0]
+			finding.SourceFile = repoFile
+			finding.Risk = RiskKnownVendor
+			finding.AutoRepairable = true
+			finding.RecommendedFix = "Re-verify and re-import " + profile.DisplayName + "'s pinned signing key via the known-vendor RPM repair flow."
+		}
+		findings = append(findings, finding)
 
 	case strings.Contains(lowerCache, "cannot find a valid baseurl") ||
 		strings.Contains(lowerCache, "could not resolve") ||
