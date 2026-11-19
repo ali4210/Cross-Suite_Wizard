@@ -8,7 +8,7 @@ import (
 func FormatRepairAction(action RepairAction) string {
 	var builder strings.Builder
 
-	builder.WriteString("APT Repository Repair Plan\n")
+	builder.WriteString(repositoryRepairPlanTitle(action.Target.PackageManager))
 	builder.WriteString(strings.Repeat("=", 80))
 	builder.WriteString("\n")
 
@@ -58,7 +58,7 @@ func FormatRepairAction(action RepairAction) string {
 	}
 
 	builder.WriteString("\nFiles:\n")
-	builder.WriteString(fmt.Sprintf("  Keyring: %s\n", action.KeyringPath))
+	builder.WriteString(fmt.Sprintf("  %s: %s\n", keyFileLabel(action.Target.PackageManager), action.KeyringPath))
 	builder.WriteString(fmt.Sprintf("  Source: %s\n", action.SourceFile))
 	builder.WriteString("  Snapshot targets:\n")
 	for _, target := range action.SnapshotTargets {
@@ -73,6 +73,28 @@ func FormatRepairAction(action RepairAction) string {
 	writeStringList(&builder, "\nRollback:", action.Rollback)
 
 	return builder.String()
+}
+
+// repositoryRepairPlanTitle and keyFileLabel pick RPM-aware wording for the dnf/yum/zypper
+// family (a "Keyring" is an APT-specific concept; RPM imports a single key into the RPM
+// database, so the file on disk is a verified key copy, not a keyring in the APT sense)
+// while leaving every other package manager's existing APT-worded output unchanged.
+func repositoryRepairPlanTitle(manager PackageManager) string {
+	switch manager {
+	case ManagerDNF, ManagerYUM, ManagerZypper:
+		return "RPM Repository Repair Plan\n"
+	default:
+		return "APT Repository Repair Plan\n"
+	}
+}
+
+func keyFileLabel(manager PackageManager) string {
+	switch manager {
+	case ManagerDNF, ManagerYUM, ManagerZypper:
+		return "Verified key copy"
+	default:
+		return "Keyring"
+	}
 }
 
 func writeStringList(builder *strings.Builder, heading string, values []string) {
