@@ -26,6 +26,7 @@ func containsCode(codes []string, want string) bool {
 func TestDNFAdapterStaleCacheProposesCleanAction(t *testing.T) {
 	exec := &fakeExecutor{
 		runSudoOutputs: []string{
+			"", // dnf lock probe: absent
 			"=== REPOLIST ===\nok\n=== HISTORY ===\n=== RPMDB ===\n",
 			"Failed to synchronize cache for repo 'fedora'\n",
 		},
@@ -44,6 +45,7 @@ func TestDNFAdapterStaleCacheProposesCleanAction(t *testing.T) {
 func TestDNFAdapterGPGFailureIsManualOnly(t *testing.T) {
 	exec := &fakeExecutor{
 		runSudoOutputs: []string{
+			"", // dnf lock probe: absent
 			"=== REPOLIST ===\n=== HISTORY ===\n=== RPMDB ===\n",
 			"GPG check FAILED\n",
 		},
@@ -62,6 +64,7 @@ func TestDNFAdapterGPGFailureIsManualOnly(t *testing.T) {
 func TestDNFAdapterRPMDBCorruptProposesRebuild(t *testing.T) {
 	exec := &fakeExecutor{
 		runSudoOutputs: []string{
+			"", // dnf lock probe: absent
 			"=== REPOLIST ===\n=== HISTORY ===\n=== RPMDB ===\nerror: rpmdb: BDB0113 Thread/process failure\n",
 			"ok\n",
 		},
@@ -84,6 +87,7 @@ func TestDNFAdapterRPMDBCorruptProposesRebuild(t *testing.T) {
 func TestDNFAdapterRPMDBCorruptMatchesModernSQLiteWording(t *testing.T) {
 	exec := &fakeExecutor{
 		runSudoOutputs: []string{
+			"", // dnf lock probe: absent
 			"=== REPOLIST ===\n=== HISTORY ===\n=== RPMDB ===\n" +
 				"error: sqlite failure: CREATE TABLE IF NOT EXISTS 'Packages' (hnum INTEGER PRIMARY KEY AUTOINCREMENT,blob BLOB NOT NULL): file is not a database\n" +
 				"error: cannot open Packages index using sqlite - No such file or directory (2)\n" +
