@@ -37,10 +37,27 @@ func (ZypperAdapter) Diagnose(
 		return output
 	}
 
+	// Real bug found and fixed here (confirmed live in an openSUSE Leap 16.0 container):
+	// the original check used `pgrep -x zypper`, but a real, actively-running zypper
+	// process's /proc/<pid>/comm is "Zypp-main", never "zypper" — so `pgrep -x zypper`
+	// can NEVER match it, meaning ZYPPER_NOT_RUNNING was always reported even while a
+	// genuine, live zypper transaction held the lock. That made this tool's own
+	// "stale, safe to auto-remove" classification always true whenever the lock file
+	// existed at all — a real safety bug: it could offer to delete an ACTIVE process's
+	// lock file during a live transaction. Fixed by reading the PID the lock file
+	// itself records (confirmed real: `cat /var/run/zypp.pid` prints the holder's PID)
+	// and checking whether that exact PID is still alive via /proc, which needs no
+	// process-name matching at all.
 	lockState := runSudo(`
 set +e
-[ -f /var/run/zypp.pid ] && echo LOCK_PRESENT || echo LOCK_ABSENT
-pgrep -x zypper >/dev/null 2>&1 && echo ZYPPER_RUNNING || echo ZYPPER_NOT_RUNNING
+LOCK_PID=$(cat /var/run/zypp.pid 2>/dev/null)
+if [ -z "$LOCK_PID" ]; then
+  echo LOCK_ABSENT
+elif [ -d "/proc/$LOCK_PID" ]; then
+  echo "LOCK_PRESENT|ACTIVE|pid=$LOCK_PID"
+else
+  echo "LOCK_PRESENT|STALE|pid=$LOCK_PID"
+fi
 `)
 
 	refresh := runSudo(`set +e
@@ -52,7 +69,7 @@ zypper --non-interactive refresh 2>&1
 zypper --non-interactive lr -u 2>&1
 `)
 
-	if strings.Contains(lockState, "LOCK_PRESENT") && strings.Contains(lockState, "ZYPPER_NOT_RUNNING") {
+	if strings.Contains(lockState, "LOCK_PRESENT|STALE") {
 		action := RepairAction{
 			ID:              "zypper-remove-stale-lock",
 			FindingCode:     "ZYPPER_LOCK_STALE",
@@ -68,12 +85,27 @@ zypper --non-interactive lr -u 2>&1
 			Code:            action.FindingCode,
 			Severity:        SeverityError,
 			Risk:            RiskAutoSafe,
-			Evidence:        "/var/run/zypp.pid exists but no zypper process is currently running.",
+			Evidence:        "/var/run/zypp.pid exists but its recorded process (" + strings.TrimSpace(lockState) + ") is no longer running.",
 			RecommendedFix:  "Remove the stale lock file (rm -f /var/run/zypp.pid).",
 			AutoRepairable:  true,
 			RequiresConsent: true,
 		})
 		actions = append(actions, action)
+	} else if strings.Contains(lockState, "LOCK_PRESENT|ACTIVE") {
+		// Real wording captured live from a genuine concurrent zypper collision in an
+		// openSUSE Leap 16.0 container: "System management is locked by the
+		// application with pid <pid> (zypper). Close this application before trying
+		// again." Manual-only, by design: this must never be auto-repaired — the lock
+		// is legitimately held by a live transaction.
+		findings = append(findings, Finding{
+			Code:            "ZYPPER_LOCK_ACTIVE",
+			Severity:        SeverityWarning,
+			Risk:            RiskManual,
+			Evidence:        "zypper's repository lock is currently held by another active process: " + strings.TrimSpace(lockState),
+			RecommendedFix:  "Wait for the owning zypper transaction to finish, then retry. Never remove this lock while its owning process is still running.",
+			AutoRepairable:  false,
+			RequiresConsent: false,
+		})
 	}
 
 	switch {
