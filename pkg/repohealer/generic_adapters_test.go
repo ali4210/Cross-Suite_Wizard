@@ -295,7 +295,7 @@ func TestPacmanAdapterMirrorUnreachableMatchesRealWording(t *testing.T) {
 func TestZypperAdapterStaleLockProposesRemoval(t *testing.T) {
 	exec := &fakeExecutor{
 		runSudoOutputs: []string{
-			"LOCK_PRESENT\nZYPPER_NOT_RUNNING\n",
+			"LOCK_PRESENT|STALE|pid=171\n",
 			"ok\n",
 		},
 	}
@@ -313,7 +313,7 @@ func TestZypperAdapterStaleLockProposesRemoval(t *testing.T) {
 func TestZypperAdapterGPGFailureIsManualOnly(t *testing.T) {
 	exec := &fakeExecutor{
 		runSudoOutputs: []string{
-			"LOCK_ABSENT\nZYPPER_NOT_RUNNING\n",
+			"LOCK_ABSENT\n",
 			"Signature verification failed for repository\n",
 		},
 	}
